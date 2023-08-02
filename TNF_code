@@ -1,0 +1,1130 @@
+@author: ruizhentan
+"""
+
+# import necessary python packages
+
+import tensorflow as tf
+import numpy as np
+from time import time
+from scipy.integrate import odeint
+# Set data type
+DTYPE='float32'
+tf.keras.backend.set_floatx(DTYPE)
+# weighting factor for losses : alpha*loss_data + (1-alpha)*loss_r
+alpha = 0.5
+
+#import os
+#os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
+
+# In[1]:
+
+# Define first model architecture
+class PINNIdentificationNet(tf.keras.Model):
+    """ Set basic architecture of the PINN model."""
+    # used when the class is called to initialize the instance
+    def __init__(self, 
+            output_dim=12,
+            num_hidden_layers=4, 
+            num_neurons_per_layer=64,
+            activation='tanh',
+            kernel_initializer='glorot_normal',
+            **kwargs):
+        super().__init__(**kwargs)
+
+        self.num_hidden_layers = num_hidden_layers
+        self.output_dim = output_dim
+        
+        # Define NN architecture
+        self.hidden = [tf.keras.layers.Dense(num_neurons_per_layer,
+                             activation=tf.keras.activations.get(activation),
+                             kernel_initializer=kernel_initializer)
+                           for _ in range(self.num_hidden_layers)]
+        self.out = tf.keras.layers.Dense(output_dim)
+
+        
+        # Initialize variable for mu, k: if trainable=True, will be trained along NN       
+        self.a1 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.a1_list = []
+        self.a2 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.a2_list = []
+        self.a3 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.a3_list = []
+        self.a4 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.a4_list = []
+        self.A4 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.A4_list = []
+        self.a5 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.a5_list = []
+        self.A5 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.A5_list = []
+       
+        self.b0 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.b0_list = []
+        self.b1 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.b1_list = []
+        self.b2 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.b2_list = [] 
+        self.B2 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.B2_list = []  
+        self.b3 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.b3_list = []
+        self.b4 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.b4_list = []
+        self.b5 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.b5_list = []
+        self.b6 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.b6_list = []
+        self.B6 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.B6_list = []
+        
+       
+    # used when the instance is called          
+    def call(self, T):
+        """Forward-pass through neural network."""
+        Z = self.hidden[0](T)
+        for i in range(1,self.num_hidden_layers):
+            Z = self.hidden[i](Z)
+        xyz = self.out(Z)
+        x = xyz[:,0:1]
+        y = xyz[:,1:2]
+        z = xyz[:,2:3]
+        w = xyz[:,3:4]
+        x2 = xyz[:,4:5]
+        y2 = xyz[:,5:6]
+        z2 = xyz[:,6:7]
+        w2 = xyz[:,7:8]
+        x3 = xyz[:,8:9]
+        y3 = xyz[:,9:10]
+        z3 = xyz[:,10:11]
+        w3 = xyz[:,11:12]
+        return x, y, z, w, x2, y2, z2, w2, x3, y3, z3, w3
+
+# In[7]:
+
+class PINNSolver_ID():
+    def __init__(self, model, T_r):
+        self.model = model
+        
+        # Store collocation points
+        self.t = T_r[:,0:1]
+        
+        # Initialize history of losses and global iteration counter
+        self.hist = []
+        self.iter = 0
+    
+    def get_r(self):
+        
+        with tf.GradientTape(persistent=True) as tape:
+            # Watch variables representing t during this GradientTape
+            tape.watch(self.t)
+            
+            # Compute current values u(t,x)
+            x, y, z,w,x2, y2, z2,w2,x3, y3, z3,w3 = self.model(self.t[:,0:1])
+            
+            x_t = tape.gradient(x, self.t)
+            y_t = tape.gradient(y, self.t)
+            z_t = tape.gradient(z, self.t)
+            w_t = tape.gradient(w, self.t)
+            x2_t = tape.gradient(x2, self.t)
+            y2_t = tape.gradient(y2, self.t)
+            z2_t = tape.gradient(z2, self.t)
+            w2_t = tape.gradient(w, self.t)
+            x3_t = tape.gradient(x3, self.t)
+            y3_t = tape.gradient(y3, self.t)
+            z3_t = tape.gradient(z3, self.t)
+            w3_t = tape.gradient(w, self.t)
+        
+        del tape
+        
+        return self.fun_r(x, y, z, w, x_t, y_t, z_t,w_t,x2, y2, z2, w2,x2_t, y2_t, z2_t,w2_t,x3, y3, z3, w3,x3_t, y3_t, z3_t,w3_t)
+    
+    def loss_fn(self, T, x, y, z, w, x2, y2, z2, w2, x3, y3, z3, w3):
+        
+        # Compute phi_r: loss coming from residual
+        f_x, f_y, f_z, f_w,f_x2, f_y2, f_z2, f_w2,f_x3, f_y3, f_z3, f_w3 = self.get_r()
+        phi_r = (1-alpha)*tf.reduce_mean(tf.square(f_x)+tf.square(f_y)+tf.square(f_z)+tf.square(f_x2)+tf.square(f_y2)+tf.square(f_z2)+tf.square(f_x3)+tf.square(f_y3)+tf.square(f_z3)+tf.square(f_w)+tf.square(f_w2)+tf.square(f_w3))
+        
+        # Initialize loss
+        loss = phi_r
+
+        # Add loss coming from difference to training data
+        for i in range(len(T)):
+            x_pred, y_pred, z_pred,w_pred,x2_pred, y2_pred, z2_pred,w2_pred,x3_pred, y3_pred, z3_pred, w3_pred= self.model(T[i:i+1,0:1])
+            loss += alpha*tf.reduce_mean(tf.square(x[i] - x_pred)+tf.square(y[i] - y_pred)+tf.square(z[i] - z_pred)+tf.square(x2[i] - x2_pred)+tf.square(y2[i] - y2_pred)+tf.square(z2[i] - z2_pred)+tf.square(x3[i] - x3_pred)+tf.square(y3[i] - y3_pred)+tf.square(z3[i] - z3_pred)+tf.square(w[i] - w_pred)+tf.square(w2[i] - w2_pred)+tf.square(w3[i] - w3_pred))
+        loss += beta*(self.model.b0 + self.model.A5 + self.model.A4  + self.model.B2 + self.model.B6)
+        return loss
+    
+    def get_grad(self, T, x,y, z, w,x2, y2, z2, w2,x3,y3, z3,w3):
+        with tf.GradientTape(persistent=True) as tape:
+            # This tape is for derivatives with
+            # respect to trainable variables
+            tape.watch(self.model.trainable_variables)
+            loss = self.loss_fn(T, x, y, z, w,x2, y2, z2, w2,x3,y3, z3,w3)            
+        g = tape.gradient(loss, self.model.trainable_variables)
+        del tape
+        
+        return loss, g
+    
+    # def fun_r(self, x, y, x_t, y_t):
+    #     f_x = x_t - tf.nn.relu(self.model.kx) - tf.nn.relu(self.model.kxy)*y/(tf.nn.relu(self.model.Kx)+y) + x
+    #     f_y = y_t - tf.nn.relu(self.model.kyx)*x/(tf.nn.relu(self.model.Ky)+x) + y 
+    #     return f_x, f_y
+    
+    def fun_r(self, x, y, z, w, x_t, y_t, z_t,w_t,x2, y2, z2, w2,x2_t, y2_t, z2_t,w2_t,x3, y3, z3, w3,x3_t, y3_t, z3_t,w3_t):
+        f_x = 0.5*((self.model.b4)/(self.model.b4 + z*z)*(0.25)/(self.model.a1 + 0.25) + (y*y)/(self.model.a3 + y*y))  - x - x_t
+        f_y = (x*x)/(self.model.a2 + x*x)*(self.model.b3)/(self.model.b3+z*z) + (self.model.A5*w*w)/(self.model.a5 + w*w) - y - y_t 
+        f_z = (self.model.b5)/(self.model.b5 + w*w)*(self.model.b0 + (self.model.B2)/(self.model.b2 + y*y) + (self.model.B6)/(self.model.b6 + x*x)) - z - z_t
+        f_w = 0.5*((self.model.b1)/(self.model.b1 + 0.25) + (self.model.A4*z*z)/(self.model.a4 + z*z))  - w - w_t
+        
+        f_x2 = 0.5*((self.model.b4)/(self.model.b4 + z2*z2)*(1.0)/(self.model.a1 + 1.0) + (y2*y2)/(self.model.a3 + y2*y2))  - x2 - x2_t
+        f_y2 = (x2*x2)/(self.model.a2 + x2*x2)*(self.model.b3)/(self.model.b3+z2*z2) + (self.model.A5*w2*w2)/(self.model.a5 + w2*w2) - y2 - y2_t 
+        f_z2 = (self.model.b5)/(self.model.b5 + w2*w2)*(self.model.b0 + (self.model.B2)/(self.model.b2 + y2*y2) + (self.model.B6)/(self.model.b6 + x2*x2)) - z2 - z2_t
+        f_w2 = 0.5*((self.model.b1)/(self.model.b1 + 1.0) + (self.model.A4*z2*z2)/(self.model.a4 + z2*z2))  - w2 - w2_t
+        
+        f_x3 = 0.5*((self.model.b4)/(self.model.b4 + z3*z3)*(4.0)/(self.model.a1 + 4.0) + (y3*y3)/(self.model.a3 + y3*y3))  - x3 - x3_t
+        f_y3 = (x3*x3)/(self.model.a2 + x3*x3)*(self.model.b3)/(self.model.b3+z3*z3) + (self.model.A5*w3*w3)/(self.model.a5 + w3*w3) - y3 - y3_t 
+        f_z3 = (self.model.b5)/(self.model.b5 + w3*w3)*(self.model.b0 + (self.model.B2)/(self.model.b2 + y3*y3) + (self.model.B6)/(self.model.b6 + x3*x3)) - z3 - z3_t
+        f_w3 = 0.5*((self.model.b1)/(self.model.b1 + 4.0) + (self.model.A4*z3*z3)/(self.model.a4 + z3*z3))  - w3 - w3_t
+
+        return f_x, f_y, f_z, f_w, f_x2, f_y2, f_z2,f_w2,f_x3, f_y3, f_z3,f_w3
+    
+    def solve_with_TFoptimizer(self, optimizer, T, x, y, z,w,x2, y2, z2,w2,x3, y3, z3, w3,target=1e-5, max_iter = 1e5):
+        """This method performs a gradient descent type optimization."""
+        
+        @tf.function
+        def train_step():
+            loss, grad_theta = self.get_grad(T, x, y, z, w, x2, y2, z2,w2, x3, y3, z3,w3)
+            
+            # Perform gradient descent step
+            optimizer.apply_gradients(zip(grad_theta, self.model.trainable_variables))
+            return loss
+        
+        # for i in range(N):
+        loss = 1.0
+        count = 0
+        while (loss > target):
+            
+            loss = train_step()
+            count = count+ 1
+            if (count>max_iter): 
+                break            
+            self.current_loss = loss.numpy()
+            self.callback()
+            
+    def callback(self, tr=None):
+        
+        a1 = self.model.a1.numpy()
+        self.model.a1_list.append(a1)  
+        a2 = self.model.a2.numpy()
+        self.model.a2_list.append(a2)
+        a3 = self.model.a3.numpy()
+        self.model.a3_list.append(a3) 
+        a4 = self.model.a4.numpy()
+        self.model.a4_list.append(a4) 
+        A4 = self.model.A4.numpy()
+        self.model.A4_list.append(A4)
+        a5 = self.model.a5.numpy()
+        self.model.a5_list.append(a5) 
+        A5 = self.model.A5.numpy()
+        self.model.A5_list.append(A5) 
+        
+        b0 = self.model.b0.numpy()
+        self.model.b0_list.append(b0)         
+        b1 = self.model.b1.numpy()
+        self.model.b1_list.append(b1) 
+        b2 = self.model.b2.numpy()
+        self.model.b2_list.append(b2)  
+        B2 = self.model.B2.numpy()
+        self.model.B2_list.append(B2)  
+        b3 = self.model.b3.numpy()
+        self.model.b3_list.append(b3) 
+        b4 = self.model.b4.numpy()
+        self.model.b4_list.append(b4)         
+        b5 = self.model.b5.numpy()
+        self.model.b5_list.append(b5) 
+        b6 = self.model.b6.numpy()
+        self.model.b6_list.append(b6) 
+        B6 = self.model.B6.numpy()
+        self.model.B6_list.append(B6) 
+ 
+        if self.iter % 1000 == 0:
+            print('It {:05d}: loss = {:10.8e} a1 = {:10.8e} A4 = {:10.8e} b5 = {:10.8e} b6 = {:10.8e} '.format(self.iter, self.current_loss, a1, A4, b5,b6))
+        self.hist.append(self.current_loss)
+        self.iter+=1        
+    
+    def get_prediction(self, **kwargs):
+
+        t_pred = np.linspace(0, 10, 121).flatten()[:,None]
+        x_pred, y_pred, z_pred, w_pred, x2_pred, y2_pred, z2_pred,w2_pred,x3_pred, y3_pred, z3_pred, w3_pred = self.model(t_pred)
+      
+        return x_pred, y_pred, z_pred, w_pred, x2_pred, y2_pred, z2_pred,w2_pred,x3_pred, y3_pred, z3_pred, w3_pred 
+    
+    def return_parameters(self,**kwargs):
+        return self.iter, self.hist, self.model.a1_list, self.model.a2_list,self.model.a3_list,self.model.a4_list,self.model.A4_list,self.model.a5_list,self.model.A5_list, self.model.b0_list,self.model.b1_list, self.model.b2_list, self.model.B2_list, self.model.b3_list, self.model.b4_list, self.model.b5_list, self.model.b6_list, self.model.B6_list    
+
+# In[2]
+def TNF(m,t, a1,a2,a3,a4,A4,a5,A5,b0, b1,b2,B2,b3,b4,b5,b6,B6): #5 parameters
+    x, y, z, w, x2, y2, z2, w2, x3, y3, z3, w3 = m
+    dxdt = 0.5*((b4)/(b4 + z*z)*(0.25)/(a1 + 0.25) + (y*y)/(a3 + y*y))  - x 
+    dydt = (x*x)/(a2 + x*x)*(b3)/(b3+z*z) + (A5*w*w)/(a5 + w*w) - y 
+    dzdt = (b5)/(b5 + w*w)*(b0 + (B2)/(b2 + y*y) + (B6)/(b6 + x*x)) - z 
+    dwdt = 0.5*((b1)/(b1 + 0.25) + (A4*z*z)/(a4 + z*z))  - w 
+        
+    dx2dt = 0.5*((b4)/(b4 + z2*z2)*(1.0)/(a1 + 1.0) + (y2*y2)/(a3 + y2*y2))  - x2 
+    dy2dt = (x2*x2)/(a2 + x2*x2)*(b3)/(b3+z2*z2) + (A5*w2*w2)/(a5 + w2*w2) - y2 
+    dz2dt= (b5)/(b5 + w2*w2)*(b0 + (B2)/(b2 + y2*y2) + (B6)/(b6 + x2*x2)) - z2 
+    dw2dt = 0.5*((b1)/(b1 + 1.0) + (A4*z2*z2)/(a4 + z2*z2))  - w2 
+        
+    dx3dt = 0.5*((b4)/(b4 + z3*z3)*(4.0)/(a1 + 4.0) + (y3*y3)/(a3 + y3*y3))  - x3 
+    dy3dt = (x3*x3)/(a2 + x3*x3)*(b3)/(b3+z3*z3) + (A5*w3*w3)/(a5 + w3*w3) - y3 
+    dz3dt = (b5)/(b5 + w3*w3)*(b0 + (B2)/(b2 + y3*y3) + (B6)/(b6 + x3*x3)) - z3
+    dw3dt = 0.5*((b1)/(b1 + 4.0) + (A4*z3*z3)/(a4 + z3*z3))  - w3 
+
+    return [dxdt, dydt, dzdt, dwdt,dx2dt, dy2dt,dz2dt,dw2dt,dx3dt,dy3dt,dz3dt,dw3dt]
+
+# In[2]
+
+# fitting to first generalized model 
+import pickle
+iterations = 5
+
+num_r = 4
+n_shape = 121
+num_r = 4
+n_species = 12
+Parameters = np.zeros((iterations+1, 19, num_r)) # 9 parameters + 1 loss + computation time
+Prediction = np.zeros((iterations+1, n_shape,n_species, num_r))
+Beta = 2.0*np.array([0, 0.0001,0.001, 0.01])
+
+
+for i in range(0, 1):
+
+    for jj in range(0,1):
+        a1,a2,a3,a4,A4,a5,A5,b0, b1,b2,B2,b3,b4,b5,b6,B6 = 0.36,0.04,0.04,0.25,1.0,1.0,0,0.0,0.16,0.49,0.49,0.09,0.25,0.16,1.0,0
+        
+        Parameters[0,0:16,0] = a1,a2,a3,a4,A4,a5,A5,b0, b1,b2,B2,b3,b4,b5,b6,B6
+        t_all = np.linspace(0, 10, n_shape)
+
+        solution_initial = odeint(TNF, [0,0,0.29,0.63,0,0,0.29,0.63,0,0,0.29,0.63], t_all, args=(a1,a2,a3,a4,A4,a5,A5,b0, b1,b2,B2,b3,b4,b5,b6,B6))
+        
+        U = np.exp(np.random.normal(0, 0.01, size=(n_shape, n_species)))
+        solution = U*solution_initial + np.random.normal(0, 0.01, size=(n_shape, n_species))
+        I,J = np.where(solution < 0)
+        solution[I,J] = 0
+
+        
+        Prediction[0,:,0,0] = solution[:,0]
+        Prediction[0,:,1,0] = solution[:,1]
+        Prediction[0,:,2,0] = solution[:,2]
+        Prediction[0,:,3,0] = solution[:,3]
+        Prediction[0,:,4,0] = solution[:,4]
+        Prediction[0,:,5,0] = solution[:,5]
+        Prediction[0,:,6,0] = solution[:,6]
+        Prediction[0,:,7,0] = solution[:,7]
+        Prediction[0,:,8,0] = solution[:,8]
+        Prediction[0,:,9,0] = solution[:,9]
+        Prediction[0,:,10,0] = solution[:,10]
+        Prediction[0,:,11,0] = solution[:,11]
+        jump = 3
+        t_data = t_all[0::jump].flatten()[:,None]
+        x_data = solution[0::jump,0].flatten()[:,None]
+        y_data = solution[0::jump,1].flatten()[:,None]
+        z_data = solution[0::jump,2].flatten()[:,None]
+        w_data = solution[0::jump,3].flatten()[:,None]
+        x2_data = solution[0::jump,4].flatten()[:,None]
+        y2_data = solution[0::jump,5].flatten()[:,None]
+        z2_data = solution[0::jump,6].flatten()[:,None]
+        w2_data = solution[0::jump,7].flatten()[:,None]
+        x3_data = solution[0::jump,8].flatten()[:,None]
+        y3_data = solution[0::jump,9].flatten()[:,None]
+        z3_data = solution[0::jump,10].flatten()[:,None]
+        w3_data = solution[0::jump,11].flatten()[:,None]
+        # collocation points for enforcing ODE, minimizing residual
+        t_physics = t_data
+    
+        # convert arrays to tf tensors
+        t_data_tf = tf.convert_to_tensor(t_data, dtype=DTYPE)
+        x_data_tf = tf.convert_to_tensor(x_data, dtype=DTYPE)
+        y_data_tf = tf.convert_to_tensor(y_data, dtype=DTYPE)
+        z_data_tf = tf.convert_to_tensor(z_data, dtype=DTYPE)
+        w_data_tf = tf.convert_to_tensor(w_data, dtype=DTYPE)
+        x2_data_tf = tf.convert_to_tensor(x2_data, dtype=DTYPE)
+        y2_data_tf = tf.convert_to_tensor(y2_data, dtype=DTYPE)
+        z2_data_tf = tf.convert_to_tensor(z2_data, dtype=DTYPE)
+        w2_data_tf = tf.convert_to_tensor(w2_data, dtype=DTYPE)
+        x3_data_tf = tf.convert_to_tensor(x3_data, dtype=DTYPE)
+        y3_data_tf = tf.convert_to_tensor(y3_data, dtype=DTYPE)
+        z3_data_tf = tf.convert_to_tensor(z3_data, dtype=DTYPE)
+        w3_data_tf = tf.convert_to_tensor(w3_data, dtype=DTYPE)
+        t_physics_tf = tf.convert_to_tensor(t_physics, dtype=DTYPE)
+
+        T_data = tf.reshape(t_data_tf[:], shape=(t_data.shape[0],1))
+        X_data = tf.reshape(x_data_tf[:], shape=(x_data.shape[0],1))
+        Y_data = tf.reshape(y_data_tf[:], shape=(y_data.shape[0],1))
+        Z_data = tf.reshape(z_data_tf[:], shape=(z_data.shape[0],1))
+        W_data = tf.reshape(w_data_tf[:], shape=(w_data.shape[0],1))
+        X2_data = tf.reshape(x2_data_tf[:], shape=(x_data.shape[0],1))
+        Y2_data = tf.reshape(y2_data_tf[:], shape=(y_data.shape[0],1))
+        Z2_data = tf.reshape(z2_data_tf[:], shape=(z_data.shape[0],1))
+        W2_data = tf.reshape(w2_data_tf[:], shape=(w2_data.shape[0],1))
+        X3_data = tf.reshape(x3_data_tf[:], shape=(x_data.shape[0],1))
+        Y3_data = tf.reshape(y3_data_tf[:], shape=(y_data.shape[0],1))
+        Z3_data = tf.reshape(z3_data_tf[:], shape=(z_data.shape[0],1))
+        W3_data = tf.reshape(w3_data_tf[:], shape=(w3_data.shape[0],1))
+        T_r = tf.reshape(t_physics_tf[:], shape=(t_physics.shape[0],1))
+    
+        for k in range(1, num_r):
+            beta = Beta[k]
+    
+            for j in range(4, iterations+1): # try 20 iterations   
+                model = PINNIdentificationNet()
+                model.build(input_shape=(None,1))
+
+                # Initialize PINN solver
+                solver = PINNSolver_ID(model, T_r)
+                # Start timer
+                t0 = time()
+
+                #lr = tf.keras.optimizers.schedules.PiecewiseConstantDecay([3000,6000],[1e-2,1e-3,5e-4])
+                lr = 2e-3
+                optim = tf.keras.optimizers.Adam(learning_rate=lr)
+                solver.solve_with_TFoptimizer(optim, T_data, X_data, Y_data, Z_data, W_data, X2_data, Y2_data, Z2_data,W2_data, X3_data, Y3_data, Z3_data,W3_data,target= 0.02,max_iter = 5e4)
+                # Print computation time
+                Parameters[j,18,k] = time()-t0
+                print('\nComputation time: {} seconds'.format(Parameters[j,17,k]))
+                iterc, loss, a1_list, a2_list,a3_list,a4_list,A4_list,a5_list,A5_list, b0_list,b1_list, b2_list,B2_list, b3_list, b4_list, b5_list, b6_list, B6_list = solver.return_parameters();
+                Parameters[j,0:16,k] = a1_list[-1], a2_list[-1],a3_list[-1],a4_list[-1],A4_list[-1],a5_list[-1],A5_list[-1], b0_list[-1],b1_list[-1], b2_list[-1],B2_list[-1], b3_list[-1], b4_list[-1], b5_list[-1], b6_list[-1], B6_list[-1]
+                Parameters[j,16,k] = loss[-1]
+                Parameters[j,17,k] = iterc
+                x_pred,y_pred, z_pred,w_pred,x2_pred,y2_pred, z2_pred,w2_pred,x3_pred,y3_pred, z3_pred,w3_pred = solver.get_prediction();
+                Prediction[j,:,0,k] = x_pred[:,0] 
+                Prediction[j,:,1,k] = y_pred[:,0]     
+                Prediction[j,:,2,k] = z_pred[:,0]
+                Prediction[j,:,3,k] = w_pred[:,0]
+                Prediction[j,:,4,k] = x2_pred[:,0] 
+                Prediction[j,:,5,k] = y2_pred[:,0]     
+                Prediction[j,:,6,k] = z2_pred[:,0]
+                Prediction[j,:,7,k] = w2_pred[:,0] 
+                Prediction[j,:,8,k] = x3_pred[:,0]
+                Prediction[j,:,9,k] = y3_pred[:,0]     
+                Prediction[j,:,10,k] = z3_pred[:,0]
+                Prediction[j,:,11,k] = w3_pred[:,0] 
+                
+                filehandler = open("TNFb0_lr1e-3_loss2e-2.obj","wb")
+                pickle.dump([Parameters,Prediction,Beta],filehandler)
+                filehandler.close()
+                
+                print(k)
+                print(j)
+        
+import pickle
+
+filehandler = open("TNFb0_lr2e-3_loss2-5e-5.obj","wb")
+pickle.dump([Parameters,Prediction,Beta],filehandler)
+filehandler.close()
+
+# In[3]
+# Second generalized model: selecting between basal and b2 related. 
+
+class PINNIdentificationNet(tf.keras.Model):
+    """ Set basic architecture of the PINN model."""
+    # used when the class is called to initialize the instance
+    def __init__(self, 
+            output_dim=12,
+            num_hidden_layers=4, 
+            num_neurons_per_layer=64,
+            activation='tanh',
+            kernel_initializer='glorot_normal',
+            **kwargs):
+        super().__init__(**kwargs)
+
+        self.num_hidden_layers = num_hidden_layers
+        self.output_dim = output_dim
+        
+        # Define NN architecture
+        self.hidden = [tf.keras.layers.Dense(num_neurons_per_layer,
+                             activation=tf.keras.activations.get(activation),
+                             kernel_initializer=kernel_initializer)
+                           for _ in range(self.num_hidden_layers)]
+        self.out = tf.keras.layers.Dense(output_dim)
+
+        
+        # Initialize variable for mu, k: if trainable=True, will be trained along NN       
+        self.a1 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.a1_list = []
+        self.a2 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.a2_list = []
+        self.a3 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.a3_list = []
+        self.a4 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.a4_list = []
+        self.A4 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.A4_list = []
+       
+        self.b0 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.b0_list = []
+        self.b1 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.b1_list = []
+        self.b2 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.b2_list = [] 
+        self.B2 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.B2_list = []  
+        self.b3 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.b3_list = []
+        self.b4 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.b4_list = []
+        self.b5 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.b5_list = []
+
+        
+       
+    # used when the instance is called          
+    def call(self, T):
+        """Forward-pass through neural network."""
+        Z = self.hidden[0](T)
+        for i in range(1,self.num_hidden_layers):
+            Z = self.hidden[i](Z)
+        xyz = self.out(Z)
+        x = xyz[:,0:1]
+        y = xyz[:,1:2]
+        z = xyz[:,2:3]
+        w = xyz[:,3:4]
+        x2 = xyz[:,4:5]
+        y2 = xyz[:,5:6]
+        z2 = xyz[:,6:7]
+        w2 = xyz[:,7:8]
+        x3 = xyz[:,8:9]
+        y3 = xyz[:,9:10]
+        z3 = xyz[:,10:11]
+        w3 = xyz[:,11:12]
+        return x, y, z, w, x2, y2, z2, w2, x3, y3, z3, w3
+
+# In[7]:
+
+class PINNSolver_ID():
+    def __init__(self, model, T_r):
+        self.model = model
+        
+        # Store collocation points
+        self.t = T_r[:,0:1]
+        
+        # Initialize history of losses and global iteration counter
+        self.hist = []
+        self.iter = 0
+    
+    def get_r(self):
+        
+        with tf.GradientTape(persistent=True) as tape:
+            # Watch variables representing t during this GradientTape
+            tape.watch(self.t)
+            
+            # Compute current values u(t,x)
+            x, y, z,w,x2, y2, z2,w2,x3, y3, z3,w3 = self.model(self.t[:,0:1])
+            
+            x_t = tape.gradient(x, self.t)
+            y_t = tape.gradient(y, self.t)
+            z_t = tape.gradient(z, self.t)
+            w_t = tape.gradient(w, self.t)
+            x2_t = tape.gradient(x2, self.t)
+            y2_t = tape.gradient(y2, self.t)
+            z2_t = tape.gradient(z2, self.t)
+            w2_t = tape.gradient(w, self.t)
+            x3_t = tape.gradient(x3, self.t)
+            y3_t = tape.gradient(y3, self.t)
+            z3_t = tape.gradient(z3, self.t)
+            w3_t = tape.gradient(w, self.t)
+        
+        del tape
+        
+        return self.fun_r(x, y, z, w, x_t, y_t, z_t,w_t,x2, y2, z2, w2,x2_t, y2_t, z2_t,w2_t,x3, y3, z3, w3,x3_t, y3_t, z3_t,w3_t)
+    
+    def loss_fn(self, T, x, y, z, w, x2, y2, z2, w2, x3, y3, z3, w3):
+        
+        # Compute phi_r: loss coming from residual
+        f_x, f_y, f_z, f_w,f_x2, f_y2, f_z2, f_w2,f_x3, f_y3, f_z3, f_w3 = self.get_r()
+        phi_r = (1-alpha)*tf.reduce_mean(tf.square(f_x)+tf.square(f_y)+tf.square(f_z)+tf.square(f_x2)+tf.square(f_y2)+tf.square(f_z2)+tf.square(f_x3)+tf.square(f_y3)+tf.square(f_z3)+tf.square(f_w)+tf.square(f_w2)+tf.square(f_w3))
+        
+        # Initialize loss
+        loss = phi_r
+
+        # Add loss coming from difference to training data
+        for i in range(len(T)):
+            x_pred, y_pred, z_pred,w_pred,x2_pred, y2_pred, z2_pred,w2_pred,x3_pred, y3_pred, z3_pred, w3_pred= self.model(T[i:i+1,0:1])
+            loss += alpha*tf.reduce_mean(tf.square(x[i] - x_pred)+tf.square(y[i] - y_pred)+tf.square(z[i] - z_pred)+tf.square(x2[i] - x2_pred)+tf.square(y2[i] - y2_pred)+tf.square(z2[i] - z2_pred)+tf.square(x3[i] - x3_pred)+tf.square(y3[i] - y3_pred)+tf.square(z3[i] - z3_pred)+tf.square(w[i] - w_pred)+tf.square(w2[i] - w2_pred)+tf.square(w3[i] - w3_pred))
+        loss += beta*(self.model.b0 + self.model.B2 )
+        return loss
+    
+    def get_grad(self, T, x,y, z, w,x2, y2, z2, w2,x3,y3, z3,w3):
+        with tf.GradientTape(persistent=True) as tape:
+            # This tape is for derivatives with
+            # respect to trainable variables
+            tape.watch(self.model.trainable_variables)
+            loss = self.loss_fn(T, x, y, z, w,x2, y2, z2, w2,x3,y3, z3,w3)            
+        g = tape.gradient(loss, self.model.trainable_variables)
+        del tape
+        
+        return loss, g
+    
+    # def fun_r(self, x, y, x_t, y_t):
+    #     f_x = x_t - tf.nn.relu(self.model.kx) - tf.nn.relu(self.model.kxy)*y/(tf.nn.relu(self.model.Kx)+y) + x
+    #     f_y = y_t - tf.nn.relu(self.model.kyx)*x/(tf.nn.relu(self.model.Ky)+x) + y 
+    #     return f_x, f_y
+    
+    def fun_r(self, x, y, z, w, x_t, y_t, z_t,w_t,x2, y2, z2, w2,x2_t, y2_t, z2_t,w2_t,x3, y3, z3, w3,x3_t, y3_t, z3_t,w3_t):
+        f_x = 0.5*((self.model.b4)/(self.model.b4 + z*z)*(0.25)/(self.model.a1 + 0.25) + (y*y)/(self.model.a3 + y*y))  - x - x_t
+        f_y = (x*x)/(self.model.a2 + x*x)*(self.model.b3)/(self.model.b3+z*z)  - y - y_t 
+        f_z = (self.model.b5)/(self.model.b5 + w*w)*(self.model.b0 + (self.model.B2)/(self.model.b2 + y*y) ) - z - z_t
+        f_w = 0.5*((self.model.b1)/(self.model.b1 + 0.25) + (self.model.A4*z*z)/(self.model.a4 + z*z))  - w - w_t
+        
+        f_x2 = 0.5*((self.model.b4)/(self.model.b4 + z2*z2)*(1.0)/(self.model.a1 + 1.0) + (y2*y2)/(self.model.a3 + y2*y2))  - x2 - x2_t
+        f_y2 = (x2*x2)/(self.model.a2 + x2*x2)*(self.model.b3)/(self.model.b3+z2*z2) - y2 - y2_t 
+        f_z2 = (self.model.b5)/(self.model.b5 + w2*w2)*(self.model.b0 + (self.model.B2)/(self.model.b2 + y2*y2) ) - z2 - z2_t
+        f_w2 = 0.5*((self.model.b1)/(self.model.b1 + 1.0) + (self.model.A4*z2*z2)/(self.model.a4 + z2*z2))  - w2 - w2_t
+        
+        f_x3 = 0.5*((self.model.b4)/(self.model.b4 + z3*z3)*(4.0)/(self.model.a1 + 4.0) + (y3*y3)/(self.model.a3 + y3*y3))  - x3 - x3_t
+        f_y3 = (x3*x3)/(self.model.a2 + x3*x3)*(self.model.b3)/(self.model.b3+z3*z3) - y3 - y3_t 
+        f_z3 = (self.model.b5)/(self.model.b5 + w3*w3)*(self.model.b0 + (self.model.B2)/(self.model.b2 + y3*y3) ) - z3 - z3_t
+        f_w3 = 0.5*((self.model.b1)/(self.model.b1 + 4.0) + (self.model.A4*z3*z3)/(self.model.a4 + z3*z3))  - w3 - w3_t
+
+        return f_x, f_y, f_z, f_w, f_x2, f_y2, f_z2,f_w2,f_x3, f_y3, f_z3,f_w3
+    
+    def solve_with_TFoptimizer(self, optimizer, T, x, y, z,w,x2, y2, z2,w2,x3, y3, z3, w3,target=1e-5, max_iter = 1e5):
+        """This method performs a gradient descent type optimization."""
+        
+        @tf.function
+        def train_step():
+            loss, grad_theta = self.get_grad(T, x, y, z, w, x2, y2, z2,w2, x3, y3, z3,w3)
+            
+            # Perform gradient descent step
+            optimizer.apply_gradients(zip(grad_theta, self.model.trainable_variables))
+            return loss
+        
+        # for i in range(N):
+        loss = 1.0
+        count = 0
+        while (loss > target):
+            
+            loss = train_step()
+            count = count+ 1
+            if (count>max_iter): 
+                break            
+            self.current_loss = loss.numpy()
+            self.callback()
+            
+    def callback(self, tr=None):
+        
+        a1 = self.model.a1.numpy()
+        self.model.a1_list.append(a1)  
+        a2 = self.model.a2.numpy()
+        self.model.a2_list.append(a2)
+        a3 = self.model.a3.numpy()
+        self.model.a3_list.append(a3) 
+        a4 = self.model.a4.numpy()
+        self.model.a4_list.append(a4) 
+        A4 = self.model.A4.numpy()
+        self.model.A4_list.append(A4)
+
+        
+        b0 = self.model.b0.numpy()
+        self.model.b0_list.append(b0)         
+        b1 = self.model.b1.numpy()
+        self.model.b1_list.append(b1) 
+        b2 = self.model.b2.numpy()
+        self.model.b2_list.append(b2)  
+        B2 = self.model.B2.numpy()
+        self.model.B2_list.append(B2)  
+        b3 = self.model.b3.numpy()
+        self.model.b3_list.append(b3) 
+        b4 = self.model.b4.numpy()
+        self.model.b4_list.append(b4)         
+        b5 = self.model.b5.numpy()
+        self.model.b5_list.append(b5) 
+ 
+        if self.iter % 1000 == 0:
+            print('It {:05d}: loss = {:10.8e} a1 = {:10.8e} A4 = {:10.8e} b0 = {:10.8e} B2 = {:10.8e} '.format(self.iter, self.current_loss, a1, A4, b0,B2))
+        self.hist.append(self.current_loss)
+        self.iter+=1        
+    
+    def get_prediction(self, **kwargs):
+
+        t_pred = np.linspace(0, 10, 121).flatten()[:,None]
+        x_pred, y_pred, z_pred, w_pred, x2_pred, y2_pred, z2_pred,w2_pred,x3_pred, y3_pred, z3_pred, w3_pred = self.model(t_pred)
+      
+        return x_pred, y_pred, z_pred, w_pred, x2_pred, y2_pred, z2_pred,w2_pred,x3_pred, y3_pred, z3_pred, w3_pred 
+    
+    def return_parameters(self,**kwargs):
+        return self.iter, self.hist, self.model.a1_list, self.model.a2_list,self.model.a3_list,self.model.a4_list,self.model.A4_list, self.model.b0_list,self.model.b1_list, self.model.b2_list, self.model.B2_list, self.model.b3_list, self.model.b4_list, self.model.b5_list   
+
+# In[2]
+
+# second round of model selection
+
+import pickle
+iterations = 5
+
+filehandler = open("TNFb0_lr2e-3_loss2e-2.obj","rb")
+[Parameters2,Prediction2,Beta] = pickle.load(filehandler)
+filehandler.close()
+
+num_r = 4
+n_shape = 121
+num_r = 4
+n_species = 12
+Parameters = np.zeros((iterations+1, 19, num_r)) # 9 parameters + 1 loss + computation time
+Prediction = np.zeros((iterations+1, n_shape,n_species, num_r))
+Beta = 2.0*np.array([0, 0.0001,0.001, 0.01])
+
+
+for i in range(0, 1):
+
+    for jj in range(0,1):
+        a1,a2,a3,a4,A4,a5,A5,b0, b1,b2,B2,b3,b4,b5,b6,B6 = 0.36,0.04,0.04,0.25,1.0,1.0,0,0.0,0.16,0.49,0.49,0.09,0.25,0.16,1.0,0
+       
+        Parameters[0,0:16,0] = a1,a2,a3,a4,A4,a5,A5,b0, b1,b2,B2,b3,b4,b5,b6,B6
+        t_all = np.linspace(0, 10, n_shape)
+        
+        solution[:,0] = Prediction2[0,:,0,0]
+        solution[:,1] = Prediction2[0,:,1,0]
+        solution[:,2] = Prediction2[0,:,2,0]
+        solution[:,3] = Prediction2[0,:,3,0]
+        solution[:,4] = Prediction2[0,:,4,0]
+        solution[:,5] = Prediction2[0,:,5,0]
+        solution[:,6] = Prediction2[0,:,6,0]
+        solution[:,7] = Prediction2[0,:,7,0]
+        solution[:,8] = Prediction2[0,:,8,0]
+        solution[:,9] = Prediction2[0,:,9,0]
+        solution[:,10] = Prediction2[0,:,10,0]
+        solution[:,11] = Prediction2[0,:,11,0]
+
+        jump = 3
+        t_data = t_all[0::jump].flatten()[:,None]
+        x_data = solution[0::jump,0].flatten()[:,None]
+        y_data = solution[0::jump,1].flatten()[:,None]
+        z_data = solution[0::jump,2].flatten()[:,None]
+        w_data = solution[0::jump,3].flatten()[:,None]
+        x2_data = solution[0::jump,4].flatten()[:,None]
+        y2_data = solution[0::jump,5].flatten()[:,None]
+        z2_data = solution[0::jump,6].flatten()[:,None]
+        w2_data = solution[0::jump,7].flatten()[:,None]
+        x3_data = solution[0::jump,8].flatten()[:,None]
+        y3_data = solution[0::jump,9].flatten()[:,None]
+        z3_data = solution[0::jump,10].flatten()[:,None]
+        w3_data = solution[0::jump,11].flatten()[:,None]
+        # collocation points for enforcing ODE, minimizing residual
+        t_physics = t_data
+    
+        # convert arrays to tf tensors
+        t_data_tf = tf.convert_to_tensor(t_data, dtype=DTYPE)
+        x_data_tf = tf.convert_to_tensor(x_data, dtype=DTYPE)
+        y_data_tf = tf.convert_to_tensor(y_data, dtype=DTYPE)
+        z_data_tf = tf.convert_to_tensor(z_data, dtype=DTYPE)
+        w_data_tf = tf.convert_to_tensor(w_data, dtype=DTYPE)
+        x2_data_tf = tf.convert_to_tensor(x2_data, dtype=DTYPE)
+        y2_data_tf = tf.convert_to_tensor(y2_data, dtype=DTYPE)
+        z2_data_tf = tf.convert_to_tensor(z2_data, dtype=DTYPE)
+        w2_data_tf = tf.convert_to_tensor(w2_data, dtype=DTYPE)
+        x3_data_tf = tf.convert_to_tensor(x3_data, dtype=DTYPE)
+        y3_data_tf = tf.convert_to_tensor(y3_data, dtype=DTYPE)
+        z3_data_tf = tf.convert_to_tensor(z3_data, dtype=DTYPE)
+        w3_data_tf = tf.convert_to_tensor(w3_data, dtype=DTYPE)
+        t_physics_tf = tf.convert_to_tensor(t_physics, dtype=DTYPE)
+
+        T_data = tf.reshape(t_data_tf[:], shape=(t_data.shape[0],1))
+        X_data = tf.reshape(x_data_tf[:], shape=(x_data.shape[0],1))
+        Y_data = tf.reshape(y_data_tf[:], shape=(y_data.shape[0],1))
+        Z_data = tf.reshape(z_data_tf[:], shape=(z_data.shape[0],1))
+        W_data = tf.reshape(w_data_tf[:], shape=(w_data.shape[0],1))
+        X2_data = tf.reshape(x2_data_tf[:], shape=(x_data.shape[0],1))
+        Y2_data = tf.reshape(y2_data_tf[:], shape=(y_data.shape[0],1))
+        Z2_data = tf.reshape(z2_data_tf[:], shape=(z_data.shape[0],1))
+        W2_data = tf.reshape(w2_data_tf[:], shape=(w2_data.shape[0],1))
+        X3_data = tf.reshape(x3_data_tf[:], shape=(x_data.shape[0],1))
+        Y3_data = tf.reshape(y3_data_tf[:], shape=(y_data.shape[0],1))
+        Z3_data = tf.reshape(z3_data_tf[:], shape=(z_data.shape[0],1))
+        W3_data = tf.reshape(w3_data_tf[:], shape=(w3_data.shape[0],1))
+        T_r = tf.reshape(t_physics_tf[:], shape=(t_physics.shape[0],1))
+    
+        for k in range(2, num_r):
+            beta = Beta[k]
+    
+            for j in range(2, iterations+1): # try 20 iterations   
+                model = PINNIdentificationNet()
+                model.build(input_shape=(None,1))
+
+                # Initialize PINN solver
+                solver = PINNSolver_ID(model, T_r)
+                # Start timer
+                t0 = time()
+
+                #lr = tf.keras.optimizers.schedules.PiecewiseConstantDecay([3000,6000],[1e-2,1e-3,5e-4])
+                lr = 2e-3
+                optim = tf.keras.optimizers.Adam(learning_rate=lr)
+                solver.solve_with_TFoptimizer(optim, T_data, X_data, Y_data, Z_data, W_data, X2_data, Y2_data, Z2_data,W2_data, X3_data, Y3_data, Z3_data,W3_data,target= 0.02,max_iter = 5e4)
+                # Print computation time
+                Parameters[j,18,k] = time()-t0
+                print('\nComputation time: {} seconds'.format(Parameters[j,17,k]))
+                iterc, loss, a1_list, a2_list,a3_list,a4_list,A4_list,b0_list,b1_list, b2_list,B2_list, b3_list, b4_list, b5_list = solver.return_parameters();
+                Parameters[j,0:16,k] = a1_list[-1], a2_list[-1],a3_list[-1],a4_list[-1],A4_list[-1],0, 1.0, b0_list[-1],b1_list[-1], b2_list[-1],B2_list[-1], b3_list[-1], b4_list[-1], b5_list[-1], 1.0, 0.0 
+                Parameters[j,16,k] = loss[-1]
+                Parameters[j,17,k] = iterc
+                x_pred,y_pred, z_pred,w_pred,x2_pred,y2_pred, z2_pred,w2_pred,x3_pred,y3_pred, z3_pred,w3_pred = solver.get_prediction();
+                Prediction[j,:,0,k] = x_pred[:,0] 
+                Prediction[j,:,1,k] = y_pred[:,0]     
+                Prediction[j,:,2,k] = z_pred[:,0]
+                Prediction[j,:,3,k] = w_pred[:,0]
+                Prediction[j,:,4,k] = x2_pred[:,0] 
+                Prediction[j,:,5,k] = y2_pred[:,0]     
+                Prediction[j,:,6,k] = z2_pred[:,0]
+                Prediction[j,:,7,k] = w2_pred[:,0] 
+                Prediction[j,:,8,k] = x3_pred[:,0]
+                Prediction[j,:,9,k] = y3_pred[:,0]     
+                Prediction[j,:,10,k] = z3_pred[:,0]
+                Prediction[j,:,11,k] = w3_pred[:,0] 
+                
+                filehandler = open("TNFr2_lr2e-3_loss2e-2.obj","wb")
+                pickle.dump([Parameters,Prediction,Beta],filehandler)
+                filehandler.close()               
+                print(k)
+                print(j)
+        
+
+# In[3]
+# fit to simplified identified circuit 
+
+class PINNIdentificationNet(tf.keras.Model):
+    """ Set basic architecture of the PINN model."""
+    # used when the class is called to initialize the instance
+    def __init__(self, 
+            output_dim=12,
+            num_hidden_layers=4, 
+            num_neurons_per_layer=64,
+            activation='tanh',
+            kernel_initializer='glorot_normal',
+            **kwargs):
+        super().__init__(**kwargs)
+
+        self.num_hidden_layers = num_hidden_layers
+        self.output_dim = output_dim
+        
+        # Define NN architecture
+        self.hidden = [tf.keras.layers.Dense(num_neurons_per_layer,
+                             activation=tf.keras.activations.get(activation),
+                             kernel_initializer=kernel_initializer)
+                           for _ in range(self.num_hidden_layers)]
+        self.out = tf.keras.layers.Dense(output_dim)
+
+        
+        # Initialize variable for mu, k: if trainable=True, will be trained along NN       
+        self.a1 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.a1_list = []
+        self.a2 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.a2_list = []
+        self.a3 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.a3_list = []
+        self.a4 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.a4_list = []
+       
+        self.b1 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.b1_list = []
+        self.b2 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.b2_list = [] 
+ 
+        self.b3 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.b3_list = []
+        self.b4 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.b4_list = []
+        self.b5 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.b5_list = []
+
+        
+       
+    # used when the instance is called          
+    def call(self, T):
+        """Forward-pass through neural network."""
+        Z = self.hidden[0](T)
+        for i in range(1,self.num_hidden_layers):
+            Z = self.hidden[i](Z)
+        xyz = self.out(Z)
+        x = xyz[:,0:1]
+        y = xyz[:,1:2]
+        z = xyz[:,2:3]
+        w = xyz[:,3:4]
+        x2 = xyz[:,4:5]
+        y2 = xyz[:,5:6]
+        z2 = xyz[:,6:7]
+        w2 = xyz[:,7:8]
+        x3 = xyz[:,8:9]
+        y3 = xyz[:,9:10]
+        z3 = xyz[:,10:11]
+        w3 = xyz[:,11:12]
+        return x, y, z, w, x2, y2, z2, w2, x3, y3, z3, w3
+
+# In[7]:
+
+class PINNSolver_ID():
+    def __init__(self, model, T_r):
+        self.model = model
+        
+        # Store collocation points
+        self.t = T_r[:,0:1]
+        
+        # Initialize history of losses and global iteration counter
+        self.hist = []
+        self.iter = 0
+    
+    def get_r(self):
+        
+        with tf.GradientTape(persistent=True) as tape:
+            # Watch variables representing t during this GradientTape
+            tape.watch(self.t)
+            
+            # Compute current values u(t,x)
+            x, y, z,w,x2, y2, z2,w2,x3, y3, z3,w3 = self.model(self.t[:,0:1])
+            
+            x_t = tape.gradient(x, self.t)
+            y_t = tape.gradient(y, self.t)
+            z_t = tape.gradient(z, self.t)
+            w_t = tape.gradient(w, self.t)
+            x2_t = tape.gradient(x2, self.t)
+            y2_t = tape.gradient(y2, self.t)
+            z2_t = tape.gradient(z2, self.t)
+            w2_t = tape.gradient(w, self.t)
+            x3_t = tape.gradient(x3, self.t)
+            y3_t = tape.gradient(y3, self.t)
+            z3_t = tape.gradient(z3, self.t)
+            w3_t = tape.gradient(w, self.t)
+        
+        del tape
+        
+        return self.fun_r(x, y, z, w, x_t, y_t, z_t,w_t,x2, y2, z2, w2,x2_t, y2_t, z2_t,w2_t,x3, y3, z3, w3,x3_t, y3_t, z3_t,w3_t)
+    
+    def loss_fn(self, T, x, y, z, w, x2, y2, z2, w2, x3, y3, z3, w3):
+        
+        # Compute phi_r: loss coming from residual
+        f_x, f_y, f_z, f_w,f_x2, f_y2, f_z2, f_w2,f_x3, f_y3, f_z3, f_w3 = self.get_r()
+        phi_r = (1-alpha)*tf.reduce_mean(tf.square(f_x)+tf.square(f_y)+tf.square(f_z)+tf.square(f_x2)+tf.square(f_y2)+tf.square(f_z2)+tf.square(f_x3)+tf.square(f_y3)+tf.square(f_z3)+tf.square(f_w)+tf.square(f_w2)+tf.square(f_w3))
+        
+        # Initialize loss
+        loss = phi_r
+
+        # Add loss coming from difference to training data
+        for i in range(len(T)):
+            x_pred, y_pred, z_pred,w_pred,x2_pred, y2_pred, z2_pred,w2_pred,x3_pred, y3_pred, z3_pred, w3_pred= self.model(T[i:i+1,0:1])
+            loss += alpha*tf.reduce_mean(tf.square(x[i] - x_pred)+tf.square(y[i] - y_pred)+tf.square(z[i] - z_pred)+tf.square(x2[i] - x2_pred)+tf.square(y2[i] - y2_pred)+tf.square(z2[i] - z2_pred)+tf.square(x3[i] - x3_pred)+tf.square(y3[i] - y3_pred)+tf.square(z3[i] - z3_pred)+tf.square(w[i] - w_pred)+tf.square(w2[i] - w2_pred)+tf.square(w3[i] - w3_pred))
+        return loss
+    
+    def get_grad(self, T, x,y, z, w,x2, y2, z2, w2,x3,y3, z3,w3):
+        with tf.GradientTape(persistent=True) as tape:
+            # This tape is for derivatives with
+            # respect to trainable variables
+            tape.watch(self.model.trainable_variables)
+            loss = self.loss_fn(T, x, y, z, w,x2, y2, z2, w2,x3,y3, z3,w3)            
+        g = tape.gradient(loss, self.model.trainable_variables)
+        del tape
+        
+        return loss, g
+    
+  
+    def fun_r(self, x, y, z, w, x_t, y_t, z_t,w_t,x2, y2, z2, w2,x2_t, y2_t, z2_t,w2_t,x3, y3, z3, w3,x3_t, y3_t, z3_t,w3_t):
+        f_x = 0.5*((self.model.b4)/(self.model.b4 + z*z)*(0.25)/(self.model.a1 + 0.25) + (y*y)/(self.model.a3 + y*y))  - x - x_t
+        f_y = (x*x)/(self.model.a2 + x*x)*(self.model.b3)/(self.model.b3+z*z)  - y - y_t 
+        f_z = (self.model.b5)/(self.model.b5 + w*w)*( (self.model.b2)/(self.model.b2 + y*y) ) - z - z_t
+        f_w = 0.5*((self.model.b1)/(self.model.b1 + 0.25) + (z*z)/(self.model.a4 + z*z))  - w - w_t
+        
+        f_x2 = 0.5*((self.model.b4)/(self.model.b4 + z2*z2)*(1.0)/(self.model.a1 + 1.0) + (y2*y2)/(self.model.a3 + y2*y2))  - x2 - x2_t
+        f_y2 = (x2*x2)/(self.model.a2 + x2*x2)*(self.model.b3)/(self.model.b3+z2*z2) - y2 - y2_t 
+        f_z2 = (self.model.b5)/(self.model.b5 + w2*w2)*( (self.model.b2)/(self.model.b2 + y2*y2) ) - z2 - z2_t
+        f_w2 = 0.5*((self.model.b1)/(self.model.b1 + 1.0) + (z2*z2)/(self.model.a4 + z2*z2))  - w2 - w2_t
+        
+        f_x3 = 0.5*((self.model.b4)/(self.model.b4 + z3*z3)*(4.0)/(self.model.a1 + 4.0) + (y3*y3)/(self.model.a3 + y3*y3))  - x3 - x3_t
+        f_y3 = (x3*x3)/(self.model.a2 + x3*x3)*(self.model.b3)/(self.model.b3+z3*z3) - y3 - y3_t 
+        f_z3 = (self.model.b5)/(self.model.b5 + w3*w3)*( (self.model.b2)/(self.model.b2 + y3*y3) ) - z3 - z3_t
+        f_w3 = 0.5*((self.model.b1)/(self.model.b1 + 4.0) + (z3*z3)/(self.model.a4 + z3*z3))  - w3 - w3_t
+
+        return f_x, f_y, f_z, f_w, f_x2, f_y2, f_z2,f_w2,f_x3, f_y3, f_z3,f_w3
+    
+    def solve_with_TFoptimizer(self, optimizer, T, x, y, z,w,x2, y2, z2,w2,x3, y3, z3, w3,target=1e-5, max_iter = 1e5):
+        """This method performs a gradient descent type optimization."""
+        
+        @tf.function
+        def train_step():
+            loss, grad_theta = self.get_grad(T, x, y, z, w, x2, y2, z2,w2, x3, y3, z3,w3)
+            
+            # Perform gradient descent step
+            optimizer.apply_gradients(zip(grad_theta, self.model.trainable_variables))
+            return loss
+        
+        # for i in range(N):
+        loss = 1.0
+        count = 0
+        while (loss > target):
+            
+            loss = train_step()
+            count = count+ 1
+            if (count>max_iter): 
+                break            
+            self.current_loss = loss.numpy()
+            self.callback()
+            
+    def callback(self, tr=None):
+        
+        a1 = self.model.a1.numpy()
+        self.model.a1_list.append(a1)  
+        a2 = self.model.a2.numpy()
+        self.model.a2_list.append(a2)
+        a3 = self.model.a3.numpy()
+        self.model.a3_list.append(a3) 
+        a4 = self.model.a4.numpy()
+        self.model.a4_list.append(a4)              
+        b1 = self.model.b1.numpy()
+        self.model.b1_list.append(b1) 
+        b2 = self.model.b2.numpy()
+        self.model.b2_list.append(b2)  
+        b3 = self.model.b3.numpy()
+        self.model.b3_list.append(b3) 
+        b4 = self.model.b4.numpy()
+        self.model.b4_list.append(b4)         
+        b5 = self.model.b5.numpy()
+        self.model.b5_list.append(b5) 
+ 
+        if self.iter % 1000 == 0:
+            print('It {:05d}: loss = {:10.8e} a1 = {:10.8e} a4 = {:10.8e} b2 = {:10.8e} b3 = {:10.8e} '.format(self.iter, self.current_loss, a1, a4, b2,b3))
+        self.hist.append(self.current_loss)
+        self.iter+=1        
+    
+    def get_prediction(self, **kwargs):
+
+        t_pred = np.linspace(0, 10, 121).flatten()[:,None]
+        x_pred, y_pred, z_pred, w_pred, x2_pred, y2_pred, z2_pred,w2_pred,x3_pred, y3_pred, z3_pred, w3_pred = self.model(t_pred)
+      
+        return x_pred, y_pred, z_pred, w_pred, x2_pred, y2_pred, z2_pred,w2_pred,x3_pred, y3_pred, z3_pred, w3_pred 
+    
+    def return_parameters(self,**kwargs):
+        return self.iter, self.hist, self.model.a1_list, self.model.a2_list,self.model.a3_list,self.model.a4_list,self.model.b1_list, self.model.b2_list, self.model.b3_list, self.model.b4_list, self.model.b5_list   
+
+# In[2]
+
+# fit to identified circuit
+
+import pickle
+iterations = 5
+
+filehandler = open("TNFb0_lr2e-3_loss2e-2.obj","rb")
+[Parameters2,Prediction2,Beta] = pickle.load(filehandler)
+filehandler.close()
+
+n_shape = 121
+n_species = 12
+Parameters = np.zeros((iterations+1, 19)) # 9 parameters + 1 loss + computation time
+Prediction = np.zeros((iterations+1, n_shape,n_species))
+
+
+for i in range(0, 1):
+
+    for jj in range(0,1):
+        a1,a2,a3,a4,A4,a5,A5,b0, b1,b2,B2,b3,b4,b5,b6,B6 = 0.36,0.04,0.04,0.25,1.0,1.0,0,0.0,0.16,0.49,0.49,0.09,0.25,0.16,1.0,0
+       
+        Parameters[0,0:16,0] = a1,a2,a3,a4,A4,a5,A5,b0, b1,b2,B2,b3,b4,b5,b6,B6
+        t_all = np.linspace(0, 10, n_shape)
+        
+        solution[:,0] = Prediction2[0,:,0,0]
+        solution[:,1] = Prediction2[0,:,1,0]
+        solution[:,2] = Prediction2[0,:,2,0]
+        solution[:,3] = Prediction2[0,:,3,0]
+        solution[:,4] = Prediction2[0,:,4,0]
+        solution[:,5] = Prediction2[0,:,5,0]
+        solution[:,6] = Prediction2[0,:,6,0]
+        solution[:,7] = Prediction2[0,:,7,0]
+        solution[:,8] = Prediction2[0,:,8,0]
+        solution[:,9] = Prediction2[0,:,9,0]
+        solution[:,10] = Prediction2[0,:,10,0]
+        solution[:,11] = Prediction2[0,:,11,0]
+
+        jump = 3
+        t_data = t_all[0::jump].flatten()[:,None]
+        x_data = solution[0::jump,0].flatten()[:,None]
+        y_data = solution[0::jump,1].flatten()[:,None]
+        z_data = solution[0::jump,2].flatten()[:,None]
+        w_data = solution[0::jump,3].flatten()[:,None]
+        x2_data = solution[0::jump,4].flatten()[:,None]
+        y2_data = solution[0::jump,5].flatten()[:,None]
+        z2_data = solution[0::jump,6].flatten()[:,None]
+        w2_data = solution[0::jump,7].flatten()[:,None]
+        x3_data = solution[0::jump,8].flatten()[:,None]
+        y3_data = solution[0::jump,9].flatten()[:,None]
+        z3_data = solution[0::jump,10].flatten()[:,None]
+        w3_data = solution[0::jump,11].flatten()[:,None]
+        # collocation points for enforcing ODE, minimizing residual
+        t_physics = t_data
+    
+        # convert arrays to tf tensors
+        t_data_tf = tf.convert_to_tensor(t_data, dtype=DTYPE)
+        x_data_tf = tf.convert_to_tensor(x_data, dtype=DTYPE)
+        y_data_tf = tf.convert_to_tensor(y_data, dtype=DTYPE)
+        z_data_tf = tf.convert_to_tensor(z_data, dtype=DTYPE)
+        w_data_tf = tf.convert_to_tensor(w_data, dtype=DTYPE)
+        x2_data_tf = tf.convert_to_tensor(x2_data, dtype=DTYPE)
+        y2_data_tf = tf.convert_to_tensor(y2_data, dtype=DTYPE)
+        z2_data_tf = tf.convert_to_tensor(z2_data, dtype=DTYPE)
+        w2_data_tf = tf.convert_to_tensor(w2_data, dtype=DTYPE)
+        x3_data_tf = tf.convert_to_tensor(x3_data, dtype=DTYPE)
+        y3_data_tf = tf.convert_to_tensor(y3_data, dtype=DTYPE)
+        z3_data_tf = tf.convert_to_tensor(z3_data, dtype=DTYPE)
+        w3_data_tf = tf.convert_to_tensor(w3_data, dtype=DTYPE)
+        t_physics_tf = tf.convert_to_tensor(t_physics, dtype=DTYPE)
+
+        T_data = tf.reshape(t_data_tf[:], shape=(t_data.shape[0],1))
+        X_data = tf.reshape(x_data_tf[:], shape=(x_data.shape[0],1))
+        Y_data = tf.reshape(y_data_tf[:], shape=(y_data.shape[0],1))
+        Z_data = tf.reshape(z_data_tf[:], shape=(z_data.shape[0],1))
+        W_data = tf.reshape(w_data_tf[:], shape=(w_data.shape[0],1))
+        X2_data = tf.reshape(x2_data_tf[:], shape=(x_data.shape[0],1))
+        Y2_data = tf.reshape(y2_data_tf[:], shape=(y_data.shape[0],1))
+        Z2_data = tf.reshape(z2_data_tf[:], shape=(z_data.shape[0],1))
+        W2_data = tf.reshape(w2_data_tf[:], shape=(w2_data.shape[0],1))
+        X3_data = tf.reshape(x3_data_tf[:], shape=(x_data.shape[0],1))
+        Y3_data = tf.reshape(y3_data_tf[:], shape=(y_data.shape[0],1))
+        Z3_data = tf.reshape(z3_data_tf[:], shape=(z_data.shape[0],1))
+        W3_data = tf.reshape(w3_data_tf[:], shape=(w3_data.shape[0],1))
+        T_r = tf.reshape(t_physics_tf[:], shape=(t_physics.shape[0],1))
+    
+
+    
+        for j in range(1, iterations+1): # try 20 iterations   
+                model = PINNIdentificationNet()
+                model.build(input_shape=(None,1))
+
+                # Initialize PINN solver
+                solver = PINNSolver_ID(model, T_r)
+                # Start timer
+                t0 = time()
+
+                #lr = tf.keras.optimizers.schedules.PiecewiseConstantDecay([3000,6000],[1e-2,1e-3,5e-4])
+                lr = 2e-3
+                optim = tf.keras.optimizers.Adam(learning_rate=lr)
+                solver.solve_with_TFoptimizer(optim, T_data, X_data, Y_data, Z_data, W_data, X2_data, Y2_data, Z2_data,W2_data, X3_data, Y3_data, Z3_data,W3_data,target= 0.02,max_iter = 5e4)
+                # Print computation time
+                Parameters[j,18] = time()-t0
+                print('\nComputation time: {} seconds'.format(Parameters[j,18]))
+                iterc, loss, a1_list, a2_list,a3_list,a4_list,b1_list, b2_list, b3_list, b4_list, b5_list = solver.return_parameters();
+                Parameters[j,0:16] = a1_list[-1], a2_list[-1],a3_list[-1],a4_list[-1],1.0,0, 1.0, 0,b1_list[-1], b2_list[-1],b2_list[-1], b3_list[-1], b4_list[-1], b5_list[-1], 1.0, 0.0 
+                Parameters[j,16] = loss[-1]
+                Parameters[j,17] = iterc
+                x_pred,y_pred, z_pred,w_pred,x2_pred,y2_pred, z2_pred,w2_pred,x3_pred,y3_pred, z3_pred,w3_pred = solver.get_prediction();
+                Prediction[j,:,0] = x_pred[:,0] 
+                Prediction[j,:,1] = y_pred[:,0]     
+                Prediction[j,:,2] = z_pred[:,0]
+                Prediction[j,:,3] = w_pred[:,0]
+                Prediction[j,:,4] = x2_pred[:,0] 
+                Prediction[j,:,5] = y2_pred[:,0]     
+                Prediction[j,:,6] = z2_pred[:,0]
+                Prediction[j,:,7] = w2_pred[:,0] 
+                Prediction[j,:,8] = x3_pred[:,0]
+                Prediction[j,:,9] = y3_pred[:,0]     
+                Prediction[j,:,10] = z3_pred[:,0]
+                Prediction[j,:,11] = w3_pred[:,0] 
+                
+                filehandler = open("TNFfitsimplecircuit_lr2e-3_loss2e-2.obj","wb")
+                pickle.dump([Parameters,Prediction,Beta],filehandler)
+                filehandler.close()               
+                print(j)
