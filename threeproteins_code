@@ -1,0 +1,1943 @@
+@author: ruizhentan
+"""
+
+# import necessary python packages
+
+import tensorflow as tf
+import numpy as np
+from time import time
+from scipy.integrate import odeint
+import pickle
+# Set data type
+DTYPE='float32'
+tf.keras.backend.set_floatx(DTYPE)
+# weighting factor for losses : alpha*loss_data + (1-alpha)*loss_r
+alpha = 0.5
+
+# In[1]:
+
+# Define model architecture
+class PINNIdentificationNet(tf.keras.Model):
+    """ Set basic architecture of the PINN model."""
+    # used when the class is called to initialize the instance
+    def __init__(self, 
+            output_dim=9,
+            num_hidden_layers=3, 
+            num_neurons_per_layer=24,
+            activation='tanh',
+            kernel_initializer='glorot_normal',
+            **kwargs):
+        super().__init__(**kwargs)
+
+        self.num_hidden_layers = num_hidden_layers
+        self.output_dim = output_dim
+        
+        # Define NN architecture
+        self.hidden = [tf.keras.layers.Dense(num_neurons_per_layer,
+                             activation=tf.keras.activations.get(activation),
+                             kernel_initializer=kernel_initializer)
+                           for _ in range(self.num_hidden_layers)]
+        self.out = tf.keras.layers.Dense(output_dim)
+
+        
+        # Initialize variable for mu, k: if trainable=True, will be trained along NN       
+        self.kx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kx_list = []
+        
+        self.kyx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kyx_list = []
+        self.Kyx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.Kyx_list = []
+        
+        self.kyz = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kyz_list = []
+        self.Kyz = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.Kyz_list = []
+        
+        self.kxy = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kxy_list = []
+        self.Kxy = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.Kxy_list = []
+        
+        self.kxz = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kxz_list = []
+        self.Kxz = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.Kxz_list = []
+        
+        self.kzx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kzx_list = []
+        self.Kzx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.Kzx_list = []
+        
+        self.kzy = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kzy_list = []
+        self.Kzy = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.Kzy_list = []
+        
+        self.k1 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.k1_list = []
+        self.k2 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.k2_list = []
+        self.k3 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.k3_list = []
+
+    # used when the instance is called          
+    def call(self, T):
+        """Forward-pass through neural network."""
+        Z = self.hidden[0](T)
+        for i in range(1,self.num_hidden_layers):
+            Z = self.hidden[i](Z)
+        xyz = self.out(Z)
+        x = xyz[:,0:1]
+        y = xyz[:,1:2]
+        z = xyz[:,2:3]
+        x2 = xyz[:,3:4]
+        y2 = xyz[:,4:5]
+        z2 = xyz[:,5:6]
+        x3 = xyz[:,6:7]
+        y3 = xyz[:,7:8]
+        z3 = xyz[:,8:9]
+        return x, y, z, x2, y2, z2, x3, y3, z3
+
+# In[7]:
+
+class PINNSolver_ID():
+    def __init__(self, model, T_r):
+        self.model = model
+        
+        # Store collocation points
+        self.t = T_r[:,0:1]
+        
+        # Initialize history of losses and global iteration counter
+        self.hist = []
+        self.iter = 0
+    
+    def get_r(self):
+        
+        with tf.GradientTape(persistent=True) as tape:
+            # Watch variables representing t during this GradientTape
+            tape.watch(self.t)
+            
+            # Compute current values u(t,x)
+            x, y, z,x2, y2, z2,x3, y3, z3 = self.model(self.t[:,0:1])
+            
+            x_t = tape.gradient(x, self.t)
+            y_t = tape.gradient(y, self.t)
+            z_t = tape.gradient(z, self.t)
+            x2_t = tape.gradient(x2, self.t)
+            y2_t = tape.gradient(y2, self.t)
+            z2_t = tape.gradient(z2, self.t)
+            x3_t = tape.gradient(x3, self.t)
+            y3_t = tape.gradient(y3, self.t)
+            z3_t = tape.gradient(z3, self.t)
+        
+        del tape
+        
+        return self.fun_r(x, y, z, x_t, y_t, z_t,x2, y2, z2, x2_t, y2_t, z2_t,x3, y3, z3, x3_t, y3_t, z3_t)
+    
+    def loss_fn(self, T, x, y, z, x2, y2, z2, x3, y3, z3):
+        
+        # Compute phi_r: loss coming from residual
+        f_x, f_y, f_z, f_x2, f_y2, f_z2,f_x3, f_y3, f_z3 = self.get_r()
+        phi_r = (1-alpha)*tf.reduce_mean(tf.square(f_x)+tf.square(f_y)+tf.square(f_z)+tf.square(f_x2)+tf.square(f_y2)+tf.square(f_z2)+tf.square(f_x3)+tf.square(f_y3)+tf.square(f_z3))
+        
+        # Initialize loss
+        loss = phi_r
+
+        # Add loss coming from difference to training data
+        for i in range(len(T)):
+            x_pred, y_pred, z_pred,x2_pred, y2_pred, z2_pred,x3_pred, y3_pred, z3_pred = self.model(T[i:i+1,0:1])
+            loss += alpha*tf.reduce_mean(tf.square(x[i] - x_pred)+tf.square(y[i] - y_pred)+tf.square(z[i] - z_pred)+tf.square(x2[i] - x2_pred)+tf.square(y2[i] - y2_pred)+tf.square(z2[i] - z2_pred)+tf.square(x3[i] - x3_pred)+tf.square(y3[i] - y3_pred)+tf.square(z3[i] - z3_pred))
+        loss += beta*(self.model.kxz + self.model.kxy + self.model.kyz + self.model.kzx)
+        return loss
+    
+    def get_grad(self, T, x,y, z, x2, y2, z2, x3,y3, z3):
+        with tf.GradientTape(persistent=True) as tape:
+            # This tape is for derivatives with
+            # respect to trainable variables
+            tape.watch(self.model.trainable_variables)
+            loss = self.loss_fn(T, x, y, z, x2, y2, z2, x3,y3, z3)            
+        g = tape.gradient(loss, self.model.trainable_variables)
+        del tape
+        
+        return loss, g
+    
+    
+    def fun_r(self, x, y, z, x_t, y_t, z_t, x2, y2, z2, x2_t, y2_t, z2_t, x3, y3, z3, x3_t, y3_t, z3_t):
+        f_x = x_t - self.model.kx - self.model.kxy*y/(self.model.Kxy+y) - self.model.kxz*z/(self.model.Kxz+z) + self.model.k1*x
+        f_y = y_t - self.model.kyx*x/(self.model.Kyx+x) - self.model.kyz*z/(self.model.Kyz+z)+ self.model.k2*y 
+        f_z = z_t - self.model.kzx*x/(self.model.Kzx+x) - self.model.kzy*y/(self.model.Kzy+y)+ self.model.k3*z
+        f_x2 = x2_t - 2*self.model.kx - self.model.kxy*y2/(self.model.Kxy+y2) - self.model.kxz*z2/(self.model.Kxz+z2) + self.model.k1*x2
+        f_y2 = y2_t - self.model.kyx*x2/(self.model.Kyx+x2) - self.model.kyz*z2/(self.model.Kyz+z2)+ self.model.k2*y2
+        f_z2 = z2_t - self.model.kzx*x2/(self.model.Kzx+x2) - self.model.kzy*y2/(self.model.Kzy+y2)+ self.model.k3*z2
+        f_x3 = x3_t - self.model.kx - self.model.kxy*y3/(self.model.Kxy+y3) - self.model.kxz*z3/(self.model.Kxz+z3) + self.model.k1*x3
+        f_y3 = y3_t - self.model.kyx*x3/(self.model.Kyx+x3) - self.model.kyz*z3/(self.model.Kyz+z3)+ self.model.k2*y3 
+        f_z3 = z3_t - self.model.kzx*x3/(self.model.Kzx+x3) - 0.1*self.model.kzy*y3/(self.model.Kzy+y3)+ self.model.k3*z3
+
+        return f_x, f_y, f_z, f_x2, f_y2, f_z2, f_x3, f_y3, f_z3
+    
+    def solve_with_TFoptimizer(self, optimizer, T, x, y, z,x2, y2, z2,x3, y3, z3, target=1e-5, max_iter = 1e5):
+        """This method performs a gradient descent type optimization."""
+        
+        @tf.function
+        def train_step():
+            loss, grad_theta = self.get_grad(T, x, y, z, x2, y2, z2, x3, y3, z3)
+            
+            # Perform gradient descent step
+            optimizer.apply_gradients(zip(grad_theta, self.model.trainable_variables))
+            return loss
+        
+        # for i in range(N):
+        loss = 1.0
+        count = 0
+        while (loss > target):
+            
+            loss = train_step()
+            count = count+ 1
+            if (count>max_iter): 
+                break            
+            self.current_loss = loss.numpy()
+            self.callback()
+            
+    def callback(self, tr=None):
+        
+        kx = self.model.kx.numpy()
+        self.model.kx_list.append(kx)  
+        kxy = self.model.kxy.numpy()
+        self.model.kxy_list.append(kxy)        
+        Kxy = self.model.Kxy.numpy()
+        self.model.Kxy_list.append(Kxy)
+        kxz = self.model.kxz.numpy()
+        self.model.kxz_list.append(kxz)        
+        Kxz = self.model.Kxz.numpy()
+        self.model.Kxz_list.append(Kxz)
+          
+        kyx = self.model.kyx.numpy()
+        self.model.kyx_list.append(kyx)        
+        Kyx = self.model.Kyx.numpy()
+        self.model.Kyx_list.append(Kyx)
+        kyz = self.model.kyz.numpy()
+        self.model.kyz_list.append(kyz)   
+        Kyz = self.model.Kyz.numpy()
+        self.model.Kyz_list.append(Kyz)   
+        kzx = self.model.kzx.numpy()
+        self.model.kzx_list.append(kzx)
+        Kzx = self.model.Kzx.numpy()
+        self.model.Kzx_list.append(Kzx)
+        kzy = self.model.kzy.numpy()
+        self.model.kzy_list.append(kzy)
+        Kzy = self.model.Kzy.numpy()
+        self.model.Kzy_list.append(Kzy)
+        
+        k1 = self.model.k1.numpy()
+        self.model.k1_list.append(k1)
+        k2 = self.model.k2.numpy()
+        self.model.k2_list.append(k2)
+        k3 = self.model.k3.numpy()
+        self.model.k3_list.append(k3)
+
+        
+
+        if self.iter % 1000 == 0:
+            print('It {:05d}: loss = {:10.8e} kx = {:10.8e} kxy = {:10.8e} kxz = {:10.8e} kyx = {:10.8e} kyz = {:10.8e} kzx = {:10.8e} kzy = {:10.8e} '.format(self.iter, self.current_loss, kx, kxy, kxz, kyx, kyz, kzx, kzy))
+        self.hist.append(self.current_loss)
+        self.iter+=1        
+    
+    def get_prediction(self, **kwargs):
+
+        t_pred = np.linspace(0, 10, 101).flatten()[:,None]
+        x_pred, y_pred, z_pred,x2_pred, y2_pred, z2_pred,x3_pred, y3_pred, z3_pred = self.model(t_pred)
+      
+        return x_pred, y_pred, z_pred, x2_pred, y2_pred, z2_pred,x3_pred, y3_pred, z3_pred
+    
+    def return_parameters(self,**kwargs):
+        return self.iter, self.hist, self.model.kx_list, self.model.kxy_list,self.model.Kxy_list,self.model.kxz_list,self.model.Kxz_list,self.model.kyx_list,self.model.Kyx_list, self.model.kyz_list,self.model.Kyz_list, self.model.kzx_list, self.model.Kzx_list, self.model.kzy_list, self.model.Kzy_list, self.model.k1_list, self.model.k2_list, self.model.k3_list  
+        
+# In[2]
+def threenodes3cons_inhs(m,t, kx, kxy, Kxy, kxz, Kxz, kyx, Kyx,kyz, Kyz, kzx, Kzx,kzy, Kzy,k1,k2,k3): #5 parameters
+    x, y, z, x2, y2, z2, x3, y3, z3 = m
+    dxdt = kx + kxy*y/(Kxy +y) + kxz*z/(Kxz +z)  - k1*x
+    dydt = kyx*x/(Kyx+x) + kyz*z/(Kyz +z) - k2*y
+    dzdt = kzx*x/(Kzx +x) + kzy*y/(Kzy +y) - k3*z
+    dx2dt = 2*kx + kxy*y2/(Kxy +y2) + kxz*z2/(Kxz +z2)  - k1*x2
+    dy2dt = kyx*x2/(Kyx+x2) + kyz*z2/(Kyz +z2) - k2*y2
+    dz2dt = kzx*x2/(Kzx +x2) + kzy*y2/(Kzy +y2) - k3*z2
+    dx3dt = kx + kxy*y3/(Kxy +y3) + kxz*z3/(Kxz +z3)  - k1*x3
+    dy3dt = kyx*x3/(Kyx+x3) + kyz*z3/(Kyz +z3) - k2*y3
+    dz3dt = kzx*x3/(Kzx +x3) + 0.1*kzy*y3/(Kzy +y3) - k3*z3
+    return [dxdt, dydt, dzdt,dx2dt, dy2dt, dz2dt,dx3dt, dy3dt, dz3dt]
+# In[2]
+
+# draw random parameters for kx, kxy, Kx, Ky, kyx
+
+filehandler = open("threenodes2cons_v3_r1_AA.obj","rb")
+[AA] = pickle.load(filehandler)
+filehandler.close()
+iterations = 5
+
+M = np.array([[1, 0,1,0,1,1,1,0,1,0,1,1,1,1,1,1],
+              [1, 0,1,0,1,1,1,0,1,1,1,1,1,1,1,1],
+              [1, 1,1,0,1,1,1,0,1,0,1,1,1,1,1,1],
+              [1, 0,1,1,1,1,1,0,1,0,1,1,1,1,1,1],
+              [1, 0,1,0,1,1,1,1,1,0,1,1,1,1,1,1]])
+#M = np.repeat(M, repeats=5, axis=0)
+num = np.shape(M)[0]
+num_r = 4
+Parameters = np.zeros((1, 5, iterations+1, 19, num_r)) # 9 parameters + 1 loss + computation time
+Prediction = np.zeros((1, 5, iterations+1, 101,9, num_r))
+Beta = np.array([0, 0.0001, 0.001,0.01])
+
+for i in range(0, 1):
+    
+    #AA = np. random.uniform(low=0.1, high=1.0, size=16)
+    for jj in range(0,2):
+        kx, kxy, Kxy, kxz, Kxz, kyx, Kyx, kyz, Kyz,kzx, Kzx, kzy, Kzy, k1, k2, k3 = M[jj,:]*AA
+        Parameters[i,jj, 0,0:16,0] = kx, kxy, Kxy, kxz, Kxz, kyx, Kyx, kyz, Kyz,kzx, Kzx, kzy, Kzy, k1, k2, k3
+        t_all = np.linspace(0, 10, 101)
+        U = np.exp(np.random.normal(0, 0.01, size=(101, 9)))
+        solution = U*odeint(threenodes3cons_inhs, [0,0,0,0,0,0,0,0,0], t_all, args=(kx, kxy, Kxy, kxz, Kxz, kyx, Kyx, kyz, Kyz,kzx, Kzx, kzy, Kzy, k1, k2, k3)) + np.random.normal(0, 0.01, size=(101, 9))
+        I,J = np.where(solution < 0)
+        solution[I,J] = 0
+        Prediction[i,jj,0,:,0,0] = solution[:,0]
+        Prediction[i,jj,0,:,1,0] = solution[:,1]
+        Prediction[i,jj,0,:,2,0] = solution[:,2]
+        Prediction[i,jj,0,:,3,0] = solution[:,3]
+        Prediction[i,jj,0,:,4,0] = solution[:,4]
+        Prediction[i,jj,0,:,5,0] = solution[:,5]
+        Prediction[i,jj,0,:,6,0] = solution[:,6]
+        Prediction[i,jj,0,:,7,0] = solution[:,7]
+        Prediction[i,jj,0,:,8,0] = solution[:,8]
+        t_data = t_all[0::5].flatten()[:,None]
+        x_data = solution[0::5,0].flatten()[:,None]
+        y_data = solution[0::5,1].flatten()[:,None]
+        z_data = solution[0::5,2].flatten()[:,None]
+        x2_data = solution[0::5,3].flatten()[:,None]
+        y2_data = solution[0::5,4].flatten()[:,None]
+        z2_data = solution[0::5,5].flatten()[:,None]
+        x3_data = solution[0::5,6].flatten()[:,None]
+        y3_data = solution[0::5,7].flatten()[:,None]
+        z3_data = solution[0::5,8].flatten()[:,None]
+        
+        x_data = Prediction[i,jj,0,0::5,0,0].flatten()[:,None]
+        y_data = Prediction[i,jj,0,0::5,1,0].flatten()[:,None]
+        z_data = Prediction[i,jj,0,0::5,2,0].flatten()[:,None]
+        x2_data =Prediction[i,jj,0,0::5,3,0].flatten()[:,None]
+        y2_data =Prediction[i,jj,0,0::5,4,0].flatten()[:,None]
+        z2_data =Prediction[i,jj,0,0::5,5,0].flatten()[:,None]
+        x3_data =Prediction[i,jj,0,0::5,6,0].flatten()[:,None]
+        y3_data =Prediction[i,jj,0,0::5,7,0].flatten()[:,None]
+        z3_data =Prediction[i,jj,0,0::5,8,0].flatten()[:,None]
+        # collocation points for enforcing ODE, minimizing residual
+        t_physics = t_data
+    
+        # convert arrays to tf tensors
+        t_data_tf = tf.convert_to_tensor(t_data, dtype=DTYPE)
+        x_data_tf = tf.convert_to_tensor(x_data, dtype=DTYPE)
+        y_data_tf = tf.convert_to_tensor(y_data, dtype=DTYPE)
+        z_data_tf = tf.convert_to_tensor(z_data, dtype=DTYPE)
+        x2_data_tf = tf.convert_to_tensor(x2_data, dtype=DTYPE)
+        y2_data_tf = tf.convert_to_tensor(y2_data, dtype=DTYPE)
+        z2_data_tf = tf.convert_to_tensor(z2_data, dtype=DTYPE)
+        x3_data_tf = tf.convert_to_tensor(x3_data, dtype=DTYPE)
+        y3_data_tf = tf.convert_to_tensor(y3_data, dtype=DTYPE)
+        z3_data_tf = tf.convert_to_tensor(z3_data, dtype=DTYPE)
+        t_physics_tf = tf.convert_to_tensor(t_physics, dtype=DTYPE)
+
+        T_data = tf.reshape(t_data_tf[:], shape=(t_data.shape[0],1))
+        X_data = tf.reshape(x_data_tf[:], shape=(x_data.shape[0],1))
+        Y_data = tf.reshape(y_data_tf[:], shape=(y_data.shape[0],1))
+        Z_data = tf.reshape(z_data_tf[:], shape=(z_data.shape[0],1))
+        X2_data = tf.reshape(x2_data_tf[:], shape=(x_data.shape[0],1))
+        Y2_data = tf.reshape(y2_data_tf[:], shape=(y_data.shape[0],1))
+        Z2_data = tf.reshape(z2_data_tf[:], shape=(z_data.shape[0],1))
+        X3_data = tf.reshape(x3_data_tf[:], shape=(x_data.shape[0],1))
+        Y3_data = tf.reshape(y3_data_tf[:], shape=(y_data.shape[0],1))
+        Z3_data = tf.reshape(z3_data_tf[:], shape=(z_data.shape[0],1))
+        T_r = tf.reshape(t_physics_tf[:], shape=(t_physics.shape[0],1))
+    
+        for k in range(0, num_r):
+            beta = Beta[k]
+    
+            for j in range(1, iterations+1): # try 20 iterations   
+                model = PINNIdentificationNet()
+                model.build(input_shape=(None,1))
+
+                # Initialize PINN solver
+                solver = PINNSolver_ID(model, T_r)
+                # Start timer
+                t0 = time()
+
+                #lr = tf.keras.optimizers.schedules.PiecewiseConstantDecay([3000,6000],[1e-2,1e-3,5e-4])
+                lr = 2e-3
+                optim = tf.keras.optimizers.Adam(learning_rate=lr)
+                solver.solve_with_TFoptimizer(optim, T_data, X_data, Y_data, Z_data, X2_data, Y2_data, Z2_data, X3_data, Y3_data, Z3_data,target= 0.01)
+                # Print computation time
+                Parameters[i,jj,j,18,k] = time()-t0
+                print('\nComputation time: {} seconds'.format(Parameters[i,jj,j,18,k]))
+                iterc, loss, kx_list, kxy_list, Kxy_list, kxz_list, Kxz_list, kyx_list, Kyx_list, kyz_list, Kyz_list,kzx_list, Kzx_list, kzy_list, Kzy_list, k1_list, k2_list, k3_list  = solver.return_parameters();
+                Parameters[i,jj,j,0:16,k] = kx_list[-1], kxy_list[-1], Kxy_list[-1], kxz_list[-1], Kxz_list[-1], kyx_list[-1], Kyx_list[-1], kyz_list[-1], Kyz_list[-1],kzx_list[-1], Kzx_list[-1], kzy_list[-1], Kzy_list[-1], k1_list[-1], k2_list[-1], k3_list[-1]
+                Parameters[i,jj,j,16,k] = loss[-1]
+                Parameters[i,jj,j,17,k] = iterc
+                x_pred,y_pred, z_pred,x2_pred,y2_pred, z2_pred,x3_pred,y3_pred, z3_pred = solver.get_prediction();
+                Prediction[i,jj,j,:,0,k] = x_pred[:,0] 
+                Prediction[i,jj,j,:,1,k] = y_pred[:,0]     
+                Prediction[i,jj,j,:,2,k] = z_pred[:,0]
+                Prediction[i,jj,j,:,3,k] = x2_pred[:,0] 
+                Prediction[i,jj,j,:,4,k] = y2_pred[:,0]     
+                Prediction[i,jj,j,:,5,k] = z2_pred[:,0]
+                Prediction[i,jj,j,:,6,k] = x3_pred[:,0] 
+                Prediction[i,jj,j,:,7,k] = y3_pred[:,0]     
+                Prediction[i,jj,j,:,8,k] = z3_pred[:,0]
+                print(kx, kxy, Kxy, kxz, Kxz, kyx, Kyx, kyz, Kyz,kzx, Kzx, kzy, Kzy, k1, k2, k3)
+                print(i)
+                print(jj)
+                print(k)
+                print(j)
+                filehandler = open("threenodes_2c1is_r1_lr2e-3_loss1e-2_circuit1.obj","wb")
+                pickle.dump([Parameters,Prediction,Beta],filehandler)
+                filehandler.close()
+
+# In[2]
+#########################################################################
+# after fnding the suitable network. Train individual circuits. #########
+#########################################################################
+# circuit 1
+class PINNIdentificationNet_c1(tf.keras.Model):
+    """ Set basic architecture of the PINN model."""
+    # used when the class is called to initialize the instance
+    def __init__(self, 
+            output_dim=9,
+            num_hidden_layers=3, 
+            num_neurons_per_layer=24,
+            activation='tanh',
+            kernel_initializer='glorot_normal',
+            **kwargs):
+        super().__init__(**kwargs)
+
+        self.num_hidden_layers = num_hidden_layers
+        self.output_dim = output_dim
+        
+        # Define NN architecture
+        self.hidden = [tf.keras.layers.Dense(num_neurons_per_layer,
+                             activation=tf.keras.activations.get(activation),
+                             kernel_initializer=kernel_initializer)
+                           for _ in range(self.num_hidden_layers)]
+        self.out = tf.keras.layers.Dense(output_dim)
+
+        
+        # Initialize variable for mu, k: if trainable=True, will be trained along NN       
+        self.kx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kx_list = []
+        
+        self.kyx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kyx_list = []
+        self.Kyx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.Kyx_list = []
+               
+        self.kzy = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kzy_list = []
+        self.Kzy = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.Kzy_list = []
+        
+        self.k1 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.k1_list = []
+        self.k2 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.k2_list = []
+        self.k3 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.k3_list = []      
+
+    # used when the instance is called          
+    def call(self, T):
+        """Forward-pass through neural network."""
+        Z = self.hidden[0](T)
+        for i in range(1,self.num_hidden_layers):
+            Z = self.hidden[i](Z)
+        xyz = self.out(Z)
+        x = xyz[:,0:1]
+        y = xyz[:,1:2]
+        z = xyz[:,2:3]
+        x2 = xyz[:,3:4]
+        y2 = xyz[:,4:5]
+        z2 = xyz[:,5:6]
+        x3 = xyz[:,6:7]
+        y3 = xyz[:,7:8]
+        z3 = xyz[:,8:9]
+        return x, y, z, x2, y2, z2, x3, y3, z3
+
+
+class PINNSolver_ID_c1():
+    def __init__(self, model, T_r):
+        self.model = model
+        
+        # Store collocation points
+        self.t = T_r[:,0:1]
+        
+        # Initialize history of losses and global iteration counter
+        self.hist = []
+        self.iter = 0
+    
+    def get_r(self):
+        
+        with tf.GradientTape(persistent=True) as tape:
+            # Watch variables representing t during this GradientTape
+            tape.watch(self.t)
+            
+            # Compute current values u(t,x)
+            x, y, z,x2, y2, z2,x3, y3, z3 = self.model(self.t[:,0:1])
+            
+            x_t = tape.gradient(x, self.t)
+            y_t = tape.gradient(y, self.t)
+            z_t = tape.gradient(z, self.t)
+            x2_t = tape.gradient(x2, self.t)
+            y2_t = tape.gradient(y2, self.t)
+            z2_t = tape.gradient(z2, self.t)
+            x3_t = tape.gradient(x3, self.t)
+            y3_t = tape.gradient(y3, self.t)
+            z3_t = tape.gradient(z3, self.t)
+        
+        del tape
+        
+        return self.fun_r(x, y, z, x_t, y_t, z_t,x2, y2, z2, x2_t, y2_t, z2_t,x3, y3, z3, x3_t, y3_t, z3_t)
+    
+    def loss_fn(self, T, x, y, z, x2, y2, z2, x3, y3, z3):
+        
+        # Compute phi_r: loss coming from residual
+        f_x, f_y, f_z, f_x2, f_y2, f_z2,f_x3, f_y3, f_z3 = self.get_r()
+        phi_r = (1-alpha)*tf.reduce_mean(tf.square(f_x)+tf.square(f_y)+tf.square(f_z)+tf.square(f_x2)+tf.square(f_y2)+tf.square(f_z2)+tf.square(f_x3)+tf.square(f_y3)+tf.square(f_z3))
+        
+        # Initialize loss
+        loss = phi_r
+
+        # Add loss coming from difference to training data
+        for i in range(len(T)):
+            x_pred, y_pred, z_pred,x2_pred, y2_pred, z2_pred,x3_pred, y3_pred, z3_pred = self.model(T[i:i+1,0:1])
+            loss += alpha*tf.reduce_mean(tf.square(x[i] - x_pred)+tf.square(y[i] - y_pred)+tf.square(z[i] - z_pred)+tf.square(x2[i] - x2_pred)+tf.square(y2[i] - y2_pred)+tf.square(z2[i] - z2_pred)+tf.square(x3[i] - x3_pred)+tf.square(y3[i] - y3_pred)+tf.square(z3[i] - z3_pred))
+        
+        return loss
+    
+    def get_grad(self, T, x,y, z, x2, y2, z2, x3,y3, z3):
+        with tf.GradientTape(persistent=True) as tape:
+            # This tape is for derivatives with
+            # respect to trainable variables
+            tape.watch(self.model.trainable_variables)
+            loss = self.loss_fn(T, x, y, z, x2, y2, z2, x3,y3, z3)            
+        g = tape.gradient(loss, self.model.trainable_variables)
+        del tape
+        
+        return loss, g
+    
+   
+    def fun_r(self, x, y, z, x_t, y_t, z_t, x2, y2, z2, x2_t, y2_t, z2_t, x3, y3, z3, x3_t, y3_t, z3_t):
+        f_x = x_t - self.model.kx  + self.model.k1*x
+        f_y = y_t - self.model.kyx*x/(self.model.Kyx+x) + self.model.k2*y 
+        f_z = z_t  - self.model.kzy*y/(self.model.Kzy+y)+ self.model.k3*z
+        f_x2 = x2_t - 2*self.model.kx  + self.model.k1*x2
+        f_y2 = y2_t - self.model.kyx*x2/(self.model.Kyx+x2)+ self.model.k2*y2
+        f_z2 = z2_t  - self.model.kzy*y2/(self.model.Kzy+y2)+ self.model.k3*z2
+        f_x3 = x3_t - self.model.kx  + self.model.k1*x3
+        f_y3 = y3_t - self.model.kyx*x3/(self.model.Kyx+x3) + self.model.k2*y3 
+        f_z3 = z3_t  - 0.1*self.model.kzy*y3/(self.model.Kzy+y3)+ self.model.k3*z3
+
+        return f_x, f_y, f_z, f_x2, f_y2, f_z2, f_x3, f_y3, f_z3
+    
+    def solve_with_TFoptimizer(self, optimizer, T, x, y, z,x2, y2, z2,x3, y3, z3, target=1e-5, max_iter = 1e5):
+        """This method performs a gradient descent type optimization."""
+        
+        @tf.function
+        def train_step():
+            loss, grad_theta = self.get_grad(T, x, y, z, x2, y2, z2, x3, y3, z3)
+            
+            # Perform gradient descent step
+            optimizer.apply_gradients(zip(grad_theta, self.model.trainable_variables))
+            return loss
+        
+        # for i in range(N):
+        loss = 1.0
+        count = 0
+        while (loss > target):
+            
+            loss = train_step()
+            count = count+ 1
+            if (count>max_iter): 
+                break            
+            self.current_loss = loss.numpy()
+            self.callback()
+            
+    def callback(self, tr=None):
+        
+        kx = self.model.kx.numpy()
+        self.model.kx_list.append(kx)  
+          
+        kyx = self.model.kyx.numpy()
+        self.model.kyx_list.append(kyx)        
+        Kyx = self.model.Kyx.numpy()
+        self.model.Kyx_list.append(Kyx)
+
+        kzy = self.model.kzy.numpy()
+        self.model.kzy_list.append(kzy)
+        Kzy = self.model.Kzy.numpy()
+        self.model.Kzy_list.append(Kzy)
+        
+        k1 = self.model.k1.numpy()
+        self.model.k1_list.append(k1)
+        k2 = self.model.k2.numpy()
+        self.model.k2_list.append(k2)
+        k3 = self.model.k3.numpy()
+        self.model.k3_list.append(k3)
+
+        
+
+        if self.iter % 1000 == 0:
+            print('It {:05d}: loss = {:10.8e} '.format(self.iter, self.current_loss))
+        self.hist.append(self.current_loss)
+        self.iter+=1        
+    
+    def get_prediction(self, **kwargs):
+
+        t_pred = np.linspace(0, 10, 101).flatten()[:,None]
+        x_pred, y_pred, z_pred,x2_pred, y2_pred, z2_pred,x3_pred, y3_pred, z3_pred = self.model(t_pred)
+      
+        return x_pred, y_pred, z_pred, x2_pred, y2_pred, z2_pred,x3_pred, y3_pred, z3_pred
+    
+    def return_parameters(self,**kwargs):
+        return self.iter, self.hist, self.model.kx_list, self.model.kyx_list,self.model.Kyx_list, self.model.kzy_list, self.model.Kzy_list, self.model.k1_list, self.model.k2_list, self.model.k3_list  
+
+
+
+
+# In[3]
+
+filehandler = open("threenodes_2c1is_r1_lr2e-3_loss1e-2.obj","rb")
+[Parameters1,Prediction1,Beta] = pickle.load(filehandler)
+filehandler.close()
+iterations = 5
+
+M = np.array([[1, 0,1,0,1,1,1,0,1,0,1,1,1,1,1,1],
+              [1, 0,1,0,1,1,1,0,1,1,1,1,1,1,1,1],
+              [1, 1,1,0,1,1,1,0,1,0,1,1,1,1,1,1],
+              [1, 0,1,1,1,1,1,0,1,0,1,1,1,1,1,1],
+              [1, 0,1,0,1,1,1,1,1,0,1,1,1,1,1,1]])
+#M = np.repeat(M, repeats=5, axis=0)
+num = np.shape(M)[0]
+
+Parameters = np.zeros((1, 5, iterations+1, 19)) # 9 parameters + 1 loss + computation time
+Prediction = np.zeros((1, 5, iterations+1, 101,9))
+
+
+for i in range(0, 1):
+    
+    for jj in range(0,1):
+        t_all = np.linspace(0, 10, 101)
+        t_data = t_all[0::5].flatten()[:,None]
+        x_data = Prediction1[i,jj,0,0::5,0,0].flatten()[:,None]
+        y_data = Prediction1[i,jj,0,0::5,1,0].flatten()[:,None]
+        z_data = Prediction1[i,jj,0,0::5,2,0].flatten()[:,None]
+        x2_data =Prediction1[i,jj,0,0::5,3,0].flatten()[:,None]
+        y2_data =Prediction1[i,jj,0,0::5,4,0].flatten()[:,None]
+        z2_data =Prediction1[i,jj,0,0::5,5,0].flatten()[:,None]
+        x3_data =Prediction1[i,jj,0,0::5,6,0].flatten()[:,None]
+        y3_data =Prediction1[i,jj,0,0::5,7,0].flatten()[:,None]
+        z3_data =Prediction1[i,jj,0,0::5,8,0].flatten()[:,None]
+        # collocation points for enforcing ODE, minimizing residual
+        t_physics = t_data
+    
+        # convert arrays to tf tensors
+        t_data_tf = tf.convert_to_tensor(t_data, dtype=DTYPE)
+        x_data_tf = tf.convert_to_tensor(x_data, dtype=DTYPE)
+        y_data_tf = tf.convert_to_tensor(y_data, dtype=DTYPE)
+        z_data_tf = tf.convert_to_tensor(z_data, dtype=DTYPE)
+        x2_data_tf = tf.convert_to_tensor(x2_data, dtype=DTYPE)
+        y2_data_tf = tf.convert_to_tensor(y2_data, dtype=DTYPE)
+        z2_data_tf = tf.convert_to_tensor(z2_data, dtype=DTYPE)
+        x3_data_tf = tf.convert_to_tensor(x3_data, dtype=DTYPE)
+        y3_data_tf = tf.convert_to_tensor(y3_data, dtype=DTYPE)
+        z3_data_tf = tf.convert_to_tensor(z3_data, dtype=DTYPE)
+        t_physics_tf = tf.convert_to_tensor(t_physics, dtype=DTYPE)
+
+        T_data = tf.reshape(t_data_tf[:], shape=(t_data.shape[0],1))
+        X_data = tf.reshape(x_data_tf[:], shape=(x_data.shape[0],1))
+        Y_data = tf.reshape(y_data_tf[:], shape=(y_data.shape[0],1))
+        Z_data = tf.reshape(z_data_tf[:], shape=(z_data.shape[0],1))
+        X2_data = tf.reshape(x2_data_tf[:], shape=(x_data.shape[0],1))
+        Y2_data = tf.reshape(y2_data_tf[:], shape=(y_data.shape[0],1))
+        Z2_data = tf.reshape(z2_data_tf[:], shape=(z_data.shape[0],1))
+        X3_data = tf.reshape(x3_data_tf[:], shape=(x_data.shape[0],1))
+        Y3_data = tf.reshape(y3_data_tf[:], shape=(y_data.shape[0],1))
+        Z3_data = tf.reshape(z3_data_tf[:], shape=(z_data.shape[0],1))
+        T_r = tf.reshape(t_physics_tf[:], shape=(t_physics.shape[0],1))
+    
+        for j in range(1, iterations+1): # try 20 iterations   
+                model = PINNIdentificationNet_c1()
+                model.build(input_shape=(None,1))
+
+                # Initialize PINN solver
+                solver = PINNSolver_ID_c1(model, T_r)
+                # Start timer
+                t0 = time()
+
+                #lr = tf.keras.optimizers.schedules.PiecewiseConstantDecay([3000,6000],[1e-2,1e-3,5e-4])
+                lr = 2e-3
+                optim = tf.keras.optimizers.Adam(learning_rate=lr)
+                solver.solve_with_TFoptimizer(optim, T_data, X_data, Y_data, Z_data, X2_data, Y2_data, Z2_data, X3_data, Y3_data, Z3_data,target= 0.01)
+                # Print computation time
+                Parameters[i,jj,j,18] = time()-t0
+                print('\nComputation time: {} seconds'.format(Parameters[i,jj,j,18]))
+                iterc, loss, kx_list, kyx_list, Kyx_list, kzy_list, Kzy_list, k1_list, k2_list, k3_list  = solver.return_parameters();
+                Parameters[i,jj,j,0:16] = kx_list[-1], 0,1,0,1, kyx_list[-1], Kyx_list[-1], 0,1,0,1,kzy_list[-1], Kzy_list[-1], k1_list[-1], k2_list[-1], k3_list[-1]
+                Parameters[i,jj,j,16] = loss[-1]
+                Parameters[i,jj,j,17] = iterc
+                x_pred,y_pred, z_pred,x2_pred,y2_pred, z2_pred,x3_pred,y3_pred, z3_pred = solver.get_prediction();
+                Prediction[i,jj,j,:,0] = x_pred[:,0] 
+                Prediction[i,jj,j,:,1] = y_pred[:,0]     
+                Prediction[i,jj,j,:,2] = z_pred[:,0]
+                Prediction[i,jj,j,:,3] = x2_pred[:,0] 
+                Prediction[i,jj,j,:,4] = y2_pred[:,0]     
+                Prediction[i,jj,j,:,5] = z2_pred[:,0]
+                Prediction[i,jj,j,:,6] = x3_pred[:,0] 
+                Prediction[i,jj,j,:,7] = y3_pred[:,0]     
+                Prediction[i,jj,j,:,8] = z3_pred[:,0]
+                #print(kx, kxy, Kxy, kxz, Kxz, kyx, Kyx, kyz, Kyz,kzx, Kzx, kzy, Kzy, k1, k2, k3)
+                print(i)
+                print(jj)
+                print(j)
+                filehandler = open("threenodes_2c1is_r1_lr2e-3_loss1e-2_fit1.obj","wb")
+                pickle.dump([Parameters,Prediction,Beta],filehandler)
+                filehandler.close()
+
+# In[4]
+# Fit circuit 2
+class PINNIdentificationNet_c2(tf.keras.Model):
+    """ Set basic architecture of the PINN model."""
+    # used when the class is called to initialize the instance
+    def __init__(self, 
+            output_dim=9,
+            num_hidden_layers=3, 
+            num_neurons_per_layer=24,
+            activation='tanh',
+            kernel_initializer='glorot_normal',
+            **kwargs):
+        super().__init__(**kwargs)
+
+        self.num_hidden_layers = num_hidden_layers
+        self.output_dim = output_dim
+        
+        # Define NN architecture
+        self.hidden = [tf.keras.layers.Dense(num_neurons_per_layer,
+                             activation=tf.keras.activations.get(activation),
+                             kernel_initializer=kernel_initializer)
+                           for _ in range(self.num_hidden_layers)]
+        self.out = tf.keras.layers.Dense(output_dim)
+
+        
+        # Initialize variable for mu, k: if trainable=True, will be trained along NN       
+        self.kx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kx_list = []
+        
+        self.kyx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kyx_list = []
+        self.Kyx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.Kyx_list = []
+               
+        self.kzx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kzx_list = []
+        self.Kzx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.Kzx_list = []
+        
+        self.kzy = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kzy_list = []
+        self.Kzy = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.Kzy_list = []
+        
+        self.k1 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.k1_list = []
+        self.k2 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.k2_list = []
+        self.k3 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.k3_list = []
+
+
+    # used when the instance is called          
+    def call(self, T):
+        """Forward-pass through neural network."""
+        Z = self.hidden[0](T)
+        for i in range(1,self.num_hidden_layers):
+            Z = self.hidden[i](Z)
+        xyz = self.out(Z)
+        x = xyz[:,0:1]
+        y = xyz[:,1:2]
+        z = xyz[:,2:3]
+        x2 = xyz[:,3:4]
+        y2 = xyz[:,4:5]
+        z2 = xyz[:,5:6]
+        x3 = xyz[:,6:7]
+        y3 = xyz[:,7:8]
+        z3 = xyz[:,8:9]
+        return x, y, z, x2, y2, z2, x3, y3, z3
+
+
+class PINNSolver_ID_c2():
+    def __init__(self, model, T_r):
+        self.model = model
+        
+        # Store collocation points
+        self.t = T_r[:,0:1]
+        
+        # Initialize history of losses and global iteration counter
+        self.hist = []
+        self.iter = 0
+    
+    def get_r(self):
+        
+        with tf.GradientTape(persistent=True) as tape:
+            # Watch variables representing t during this GradientTape
+            tape.watch(self.t)
+            
+            # Compute current values u(t,x)
+            x, y, z,x2, y2, z2,x3, y3, z3 = self.model(self.t[:,0:1])
+            
+            x_t = tape.gradient(x, self.t)
+            y_t = tape.gradient(y, self.t)
+            z_t = tape.gradient(z, self.t)
+            x2_t = tape.gradient(x2, self.t)
+            y2_t = tape.gradient(y2, self.t)
+            z2_t = tape.gradient(z2, self.t)
+            x3_t = tape.gradient(x3, self.t)
+            y3_t = tape.gradient(y3, self.t)
+            z3_t = tape.gradient(z3, self.t)
+        
+        del tape
+        
+        return self.fun_r(x, y, z, x_t, y_t, z_t,x2, y2, z2, x2_t, y2_t, z2_t,x3, y3, z3, x3_t, y3_t, z3_t)
+    
+    def loss_fn(self, T, x, y, z, x2, y2, z2, x3, y3, z3):
+        
+        # Compute phi_r: loss coming from residual
+        f_x, f_y, f_z, f_x2, f_y2, f_z2,f_x3, f_y3, f_z3 = self.get_r()
+        phi_r = (1-alpha)*tf.reduce_mean(tf.square(f_x)+tf.square(f_y)+tf.square(f_z)+tf.square(f_x2)+tf.square(f_y2)+tf.square(f_z2)+tf.square(f_x3)+tf.square(f_y3)+tf.square(f_z3))
+        
+        # Initialize loss
+        loss = phi_r
+
+        # Add loss coming from difference to training data
+        for i in range(len(T)):
+            x_pred, y_pred, z_pred,x2_pred, y2_pred, z2_pred,x3_pred, y3_pred, z3_pred = self.model(T[i:i+1,0:1])
+            loss += alpha*tf.reduce_mean(tf.square(x[i] - x_pred)+tf.square(y[i] - y_pred)+tf.square(z[i] - z_pred)+tf.square(x2[i] - x2_pred)+tf.square(y2[i] - y2_pred)+tf.square(z2[i] - z2_pred)+tf.square(x3[i] - x3_pred)+tf.square(y3[i] - y3_pred)+tf.square(z3[i] - z3_pred))
+
+        return loss
+    
+    def get_grad(self, T, x,y, z, x2, y2, z2, x3,y3, z3):
+        with tf.GradientTape(persistent=True) as tape:
+            # This tape is for derivatives with
+            # respect to trainable variables
+            tape.watch(self.model.trainable_variables)
+            loss = self.loss_fn(T, x, y, z, x2, y2, z2, x3,y3, z3)            
+        g = tape.gradient(loss, self.model.trainable_variables)
+        del tape
+        
+        return loss, g
+
+    def fun_r(self, x, y, z, x_t, y_t, z_t, x2, y2, z2, x2_t, y2_t, z2_t, x3, y3, z3, x3_t, y3_t, z3_t):
+        f_x = x_t - self.model.kx  + self.model.k1*x
+        f_y = y_t - self.model.kyx*x/(self.model.Kyx+x) + self.model.k2*y 
+        f_z = z_t - self.model.kzx*x/(self.model.Kzx+x) - self.model.kzy*y/(self.model.Kzy+y)+ self.model.k3*z
+        f_x2 = x2_t - 2*self.model.kx + self.model.k1*x2
+        f_y2 = y2_t - self.model.kyx*x2/(self.model.Kyx+x2) + self.model.k2*y2
+        f_z2 = z2_t - self.model.kzx*x2/(self.model.Kzx+x2) - self.model.kzy*y2/(self.model.Kzy+y2)+ self.model.k3*z2
+        f_x3 = x3_t - self.model.kx + self.model.k1*x3
+        f_y3 = y3_t - self.model.kyx*x3/(self.model.Kyx+x3) + self.model.k2*y3 
+        f_z3 = z3_t - self.model.kzx*x3/(self.model.Kzx+x3) - 0.1*self.model.kzy*y3/(self.model.Kzy+y3)+ self.model.k3*z3
+
+        return f_x, f_y, f_z, f_x2, f_y2, f_z2, f_x3, f_y3, f_z3
+    
+    def solve_with_TFoptimizer(self, optimizer, T, x, y, z,x2, y2, z2,x3, y3, z3, target=1e-5, max_iter = 1e5):
+        """This method performs a gradient descent type optimization."""
+        
+        @tf.function
+        def train_step():
+            loss, grad_theta = self.get_grad(T, x, y, z, x2, y2, z2, x3, y3, z3)
+            
+            # Perform gradient descent step
+            optimizer.apply_gradients(zip(grad_theta, self.model.trainable_variables))
+            return loss
+        
+        # for i in range(N):
+        loss = 1.0
+        count = 0
+        while (loss > target):
+            
+            loss = train_step()
+            count = count+ 1
+            if (count>max_iter): 
+                break            
+            self.current_loss = loss.numpy()
+            self.callback()
+            
+    def callback(self, tr=None):
+        
+        kx = self.model.kx.numpy()
+        self.model.kx_list.append(kx)  
+          
+        kyx = self.model.kyx.numpy()
+        self.model.kyx_list.append(kyx)        
+        Kyx = self.model.Kyx.numpy()
+        self.model.Kyx_list.append(Kyx)
+
+        kzx = self.model.kzx.numpy()
+        self.model.kzx_list.append(kzx)
+        Kzx = self.model.Kzx.numpy()
+        self.model.Kzx_list.append(Kzx)
+        kzy = self.model.kzy.numpy()
+        self.model.kzy_list.append(kzy)
+        Kzy = self.model.Kzy.numpy()
+        self.model.Kzy_list.append(Kzy)
+        
+        k1 = self.model.k1.numpy()
+        self.model.k1_list.append(k1)
+        k2 = self.model.k2.numpy()
+        self.model.k2_list.append(k2)
+        k3 = self.model.k3.numpy()
+        self.model.k3_list.append(k3)
+
+        
+
+        if self.iter % 1000 == 0:
+            print('It {:05d}: loss = {:10.8e}'.format(self.iter, self.current_loss))
+        self.hist.append(self.current_loss)
+        self.iter+=1        
+    
+    def get_prediction(self, **kwargs):
+
+        t_pred = np.linspace(0, 10, 101).flatten()[:,None]
+        x_pred, y_pred, z_pred,x2_pred, y2_pred, z2_pred,x3_pred, y3_pred, z3_pred = self.model(t_pred)
+      
+        return x_pred, y_pred, z_pred, x2_pred, y2_pred, z2_pred,x3_pred, y3_pred, z3_pred
+    
+    def return_parameters(self,**kwargs):
+        return self.iter, self.hist, self.model.kx_list, self.model.kyx_list,self.model.Kyx_list, self.model.kzx_list, self.model.Kzx_list, self.model.kzy_list, self.model.Kzy_list, self.model.k1_list, self.model.k2_list, self.model.k3_list  
+
+# In[3]
+filehandler = open("threenodes_2c1is_r1_lr2e-3_loss1e-2.obj","rb")
+[Parameters1,Prediction1,Beta] = pickle.load(filehandler)
+filehandler.close()
+iterations = 5
+
+M = np.array([[1, 0,1,0,1,1,1,0,1,0,1,1,1,1,1,1],
+              [1, 0,1,0,1,1,1,0,1,1,1,1,1,1,1,1],
+              [1, 1,1,0,1,1,1,0,1,0,1,1,1,1,1,1],
+              [1, 0,1,1,1,1,1,0,1,0,1,1,1,1,1,1],
+              [1, 0,1,0,1,1,1,1,1,0,1,1,1,1,1,1]])
+#M = np.repeat(M, repeats=5, axis=0)
+num = np.shape(M)[0]
+
+Parameters = np.zeros((1, 5, iterations+1, 19)) # 9 parameters + 1 loss + computation time
+Prediction = np.zeros((1, 5, iterations+1, 101,9))
+
+
+for i in range(0, 1):
+    
+    for jj in range(1,2):
+        t_all = np.linspace(0, 10, 101)
+        t_data = t_all[0::5].flatten()[:,None]
+        x_data = Prediction1[i,jj,0,0::5,0,0].flatten()[:,None]
+        y_data = Prediction1[i,jj,0,0::5,1,0].flatten()[:,None]
+        z_data = Prediction1[i,jj,0,0::5,2,0].flatten()[:,None]
+        x2_data =Prediction1[i,jj,0,0::5,3,0].flatten()[:,None]
+        y2_data =Prediction1[i,jj,0,0::5,4,0].flatten()[:,None]
+        z2_data =Prediction1[i,jj,0,0::5,5,0].flatten()[:,None]
+        x3_data =Prediction1[i,jj,0,0::5,6,0].flatten()[:,None]
+        y3_data =Prediction1[i,jj,0,0::5,7,0].flatten()[:,None]
+        z3_data =Prediction1[i,jj,0,0::5,8,0].flatten()[:,None]
+        # collocation points for enforcing ODE, minimizing residual
+        t_physics = t_data
+    
+        # convert arrays to tf tensors
+        t_data_tf = tf.convert_to_tensor(t_data, dtype=DTYPE)
+        x_data_tf = tf.convert_to_tensor(x_data, dtype=DTYPE)
+        y_data_tf = tf.convert_to_tensor(y_data, dtype=DTYPE)
+        z_data_tf = tf.convert_to_tensor(z_data, dtype=DTYPE)
+        x2_data_tf = tf.convert_to_tensor(x2_data, dtype=DTYPE)
+        y2_data_tf = tf.convert_to_tensor(y2_data, dtype=DTYPE)
+        z2_data_tf = tf.convert_to_tensor(z2_data, dtype=DTYPE)
+        x3_data_tf = tf.convert_to_tensor(x3_data, dtype=DTYPE)
+        y3_data_tf = tf.convert_to_tensor(y3_data, dtype=DTYPE)
+        z3_data_tf = tf.convert_to_tensor(z3_data, dtype=DTYPE)
+        t_physics_tf = tf.convert_to_tensor(t_physics, dtype=DTYPE)
+
+        T_data = tf.reshape(t_data_tf[:], shape=(t_data.shape[0],1))
+        X_data = tf.reshape(x_data_tf[:], shape=(x_data.shape[0],1))
+        Y_data = tf.reshape(y_data_tf[:], shape=(y_data.shape[0],1))
+        Z_data = tf.reshape(z_data_tf[:], shape=(z_data.shape[0],1))
+        X2_data = tf.reshape(x2_data_tf[:], shape=(x_data.shape[0],1))
+        Y2_data = tf.reshape(y2_data_tf[:], shape=(y_data.shape[0],1))
+        Z2_data = tf.reshape(z2_data_tf[:], shape=(z_data.shape[0],1))
+        X3_data = tf.reshape(x3_data_tf[:], shape=(x_data.shape[0],1))
+        Y3_data = tf.reshape(y3_data_tf[:], shape=(y_data.shape[0],1))
+        Z3_data = tf.reshape(z3_data_tf[:], shape=(z_data.shape[0],1))
+        T_r = tf.reshape(t_physics_tf[:], shape=(t_physics.shape[0],1))
+    
+        for j in range(1, iterations+1): # try 20 iterations   
+                model = PINNIdentificationNet_c2()
+                model.build(input_shape=(None,1))
+
+                # Initialize PINN solver
+                solver = PINNSolver_ID_c2(model, T_r)
+                # Start timer
+                t0 = time()
+
+                #lr = tf.keras.optimizers.schedules.PiecewiseConstantDecay([3000,6000],[1e-2,1e-3,5e-4])
+                lr = 2e-3
+                optim = tf.keras.optimizers.Adam(learning_rate=lr)
+                solver.solve_with_TFoptimizer(optim, T_data, X_data, Y_data, Z_data, X2_data, Y2_data, Z2_data, X3_data, Y3_data, Z3_data,target= 0.01)
+                # Print computation time
+                Parameters[i,jj,j,18] = time()-t0
+                print('\nComputation time: {} seconds'.format(Parameters[i,jj,j,18]))
+                iterc, loss, kx_list, kyx_list, Kyx_list, kzx_list, Kzx_list,  kzy_list, Kzy_list, k1_list, k2_list, k3_list  = solver.return_parameters();
+                Parameters[i,jj,j,0:16] = kx_list[-1], 0,1,0,1, kyx_list[-1], Kyx_list[-1], 0,1, kzx_list[-1], Kzx_list[-1],kzy_list[-1], Kzy_list[-1], k1_list[-1], k2_list[-1], k3_list[-1]
+                Parameters[i,jj,j,16] = loss[-1]
+                Parameters[i,jj,j,17] = iterc
+                x_pred,y_pred, z_pred,x2_pred,y2_pred, z2_pred,x3_pred,y3_pred, z3_pred = solver.get_prediction();
+                Prediction[i,jj,j,:,0] = x_pred[:,0] 
+                Prediction[i,jj,j,:,1] = y_pred[:,0]     
+                Prediction[i,jj,j,:,2] = z_pred[:,0]
+                Prediction[i,jj,j,:,3] = x2_pred[:,0] 
+                Prediction[i,jj,j,:,4] = y2_pred[:,0]     
+                Prediction[i,jj,j,:,5] = z2_pred[:,0]
+                Prediction[i,jj,j,:,6] = x3_pred[:,0] 
+                Prediction[i,jj,j,:,7] = y3_pred[:,0]     
+                Prediction[i,jj,j,:,8] = z3_pred[:,0]
+                print(i)
+                print(jj)
+
+                print(j)
+                filehandler = open("threenodes_2c1is_r1_lr2e-3_loss1e-2_fit2.obj","wb")
+                pickle.dump([Parameters,Prediction,Beta],filehandler)
+                filehandler.close()
+                
+# In[1]:
+    ## Circuit 3
+
+# Define model architecture
+class PINNIdentificationNet_c3(tf.keras.Model):
+    """ Set basic architecture of the PINN model."""
+    # used when the class is called to initialize the instance
+    def __init__(self, 
+            output_dim=9,
+            num_hidden_layers=3, 
+            num_neurons_per_layer=24,
+            activation='tanh',
+            kernel_initializer='glorot_normal',
+            **kwargs):
+        super().__init__(**kwargs)
+
+        self.num_hidden_layers = num_hidden_layers
+        self.output_dim = output_dim
+        
+        # Define NN architecture
+        self.hidden = [tf.keras.layers.Dense(num_neurons_per_layer,
+                             activation=tf.keras.activations.get(activation),
+                             kernel_initializer=kernel_initializer)
+                           for _ in range(self.num_hidden_layers)]
+        self.out = tf.keras.layers.Dense(output_dim)
+
+        
+        # Initialize variable for mu, k: if trainable=True, will be trained along NN       
+        self.kx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kx_list = []
+        
+        self.kyx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kyx_list = []
+        self.Kyx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.Kyx_list = []
+        
+        
+        self.kxy = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kxy_list = []
+        self.Kxy = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.Kxy_list = []
+        
+        
+        self.kzy = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kzy_list = []
+        self.Kzy = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.Kzy_list = []
+        
+        self.k1 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.k1_list = []
+        self.k2 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.k2_list = []
+        self.k3 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.k3_list = []
+
+    # used when the instance is called          
+    def call(self, T):
+        """Forward-pass through neural network."""
+        Z = self.hidden[0](T)
+        for i in range(1,self.num_hidden_layers):
+            Z = self.hidden[i](Z)
+        xyz = self.out(Z)
+        x = xyz[:,0:1]
+        y = xyz[:,1:2]
+        z = xyz[:,2:3]
+        x2 = xyz[:,3:4]
+        y2 = xyz[:,4:5]
+        z2 = xyz[:,5:6]
+        x3 = xyz[:,6:7]
+        y3 = xyz[:,7:8]
+        z3 = xyz[:,8:9]
+        return x, y, z, x2, y2, z2, x3, y3, z3
+
+
+class PINNSolver_ID_c3():
+    def __init__(self, model, T_r):
+        self.model = model
+        
+        # Store collocation points
+        self.t = T_r[:,0:1]
+        
+        # Initialize history of losses and global iteration counter
+        self.hist = []
+        self.iter = 0
+    
+    def get_r(self):
+        
+        with tf.GradientTape(persistent=True) as tape:
+            # Watch variables representing t during this GradientTape
+            tape.watch(self.t)
+            
+            # Compute current values u(t,x)
+            x, y, z,x2, y2, z2,x3, y3, z3 = self.model(self.t[:,0:1])
+            
+            x_t = tape.gradient(x, self.t)
+            y_t = tape.gradient(y, self.t)
+            z_t = tape.gradient(z, self.t)
+            x2_t = tape.gradient(x2, self.t)
+            y2_t = tape.gradient(y2, self.t)
+            z2_t = tape.gradient(z2, self.t)
+            x3_t = tape.gradient(x3, self.t)
+            y3_t = tape.gradient(y3, self.t)
+            z3_t = tape.gradient(z3, self.t)
+        
+        del tape
+        
+        return self.fun_r(x, y, z, x_t, y_t, z_t,x2, y2, z2, x2_t, y2_t, z2_t,x3, y3, z3, x3_t, y3_t, z3_t)
+    
+    def loss_fn(self, T, x, y, z, x2, y2, z2, x3, y3, z3):
+        
+        # Compute phi_r: loss coming from residual
+        f_x, f_y, f_z, f_x2, f_y2, f_z2,f_x3, f_y3, f_z3 = self.get_r()
+        phi_r = (1-alpha)*tf.reduce_mean(tf.square(f_x)+tf.square(f_y)+tf.square(f_z)+tf.square(f_x2)+tf.square(f_y2)+tf.square(f_z2)+tf.square(f_x3)+tf.square(f_y3)+tf.square(f_z3))
+        
+        # Initialize loss
+        loss = phi_r
+
+        # Add loss coming from difference to training data
+        for i in range(len(T)):
+            x_pred, y_pred, z_pred,x2_pred, y2_pred, z2_pred,x3_pred, y3_pred, z3_pred = self.model(T[i:i+1,0:1])
+            loss += alpha*tf.reduce_mean(tf.square(x[i] - x_pred)+tf.square(y[i] - y_pred)+tf.square(z[i] - z_pred)+tf.square(x2[i] - x2_pred)+tf.square(y2[i] - y2_pred)+tf.square(z2[i] - z2_pred)+tf.square(x3[i] - x3_pred)+tf.square(y3[i] - y3_pred)+tf.square(z3[i] - z3_pred))
+        return loss
+    
+    def get_grad(self, T, x,y, z, x2, y2, z2, x3,y3, z3):
+        with tf.GradientTape(persistent=True) as tape:
+            # This tape is for derivatives with
+            # respect to trainable variables
+            tape.watch(self.model.trainable_variables)
+            loss = self.loss_fn(T, x, y, z, x2, y2, z2, x3,y3, z3)            
+        g = tape.gradient(loss, self.model.trainable_variables)
+        del tape
+        
+        return loss, g
+       
+    def fun_r(self, x, y, z, x_t, y_t, z_t, x2, y2, z2, x2_t, y2_t, z2_t, x3, y3, z3, x3_t, y3_t, z3_t):
+        f_x = x_t - self.model.kx - self.model.kxy*y/(self.model.Kxy+y) + self.model.k1*x
+        f_y = y_t - self.model.kyx*x/(self.model.Kyx+x) + self.model.k2*y 
+        f_z = z_t  - self.model.kzy*y/(self.model.Kzy+y)+ self.model.k3*z
+        f_x2 = x2_t - 2*self.model.kx - self.model.kxy*y2/(self.model.Kxy+y2) + self.model.k1*x2
+        f_y2 = y2_t - self.model.kyx*x2/(self.model.Kyx+x2) + self.model.k2*y2
+        f_z2 = z2_t  - self.model.kzy*y2/(self.model.Kzy+y2)+ self.model.k3*z2
+        f_x3 = x3_t - self.model.kx - self.model.kxy*y3/(self.model.Kxy+y3) + self.model.k1*x3
+        f_y3 = y3_t - self.model.kyx*x3/(self.model.Kyx+x3) + self.model.k2*y3 
+        f_z3 = z3_t  - 0.1*self.model.kzy*y3/(self.model.Kzy+y3)+ self.model.k3*z3
+
+        return f_x, f_y, f_z, f_x2, f_y2, f_z2, f_x3, f_y3, f_z3
+    
+    def solve_with_TFoptimizer(self, optimizer, T, x, y, z,x2, y2, z2,x3, y3, z3, target=1e-5, max_iter = 1e5):
+        """This method performs a gradient descent type optimization."""
+        
+        @tf.function
+        def train_step():
+            loss, grad_theta = self.get_grad(T, x, y, z, x2, y2, z2, x3, y3, z3)
+            
+            # Perform gradient descent step
+            optimizer.apply_gradients(zip(grad_theta, self.model.trainable_variables))
+            return loss
+        
+        # for i in range(N):
+        loss = 1.0
+        count = 0
+        while (loss > target):
+            
+            loss = train_step()
+            count = count+ 1
+            if (count>max_iter): 
+                break            
+            self.current_loss = loss.numpy()
+            self.callback()
+            
+    def callback(self, tr=None):
+        
+        kx = self.model.kx.numpy()
+        self.model.kx_list.append(kx)  
+        kxy = self.model.kxy.numpy()
+        self.model.kxy_list.append(kxy)        
+        Kxy = self.model.Kxy.numpy()
+        self.model.Kxy_list.append(Kxy)
+          
+        kyx = self.model.kyx.numpy()
+        self.model.kyx_list.append(kyx)        
+        Kyx = self.model.Kyx.numpy()
+        self.model.Kyx_list.append(Kyx)
+
+        kzy = self.model.kzy.numpy()
+        self.model.kzy_list.append(kzy)
+        Kzy = self.model.Kzy.numpy()
+        self.model.Kzy_list.append(Kzy)
+        
+        k1 = self.model.k1.numpy()
+        self.model.k1_list.append(k1)
+        k2 = self.model.k2.numpy()
+        self.model.k2_list.append(k2)
+        k3 = self.model.k3.numpy()
+        self.model.k3_list.append(k3)
+
+        
+
+        if self.iter % 1000 == 0:
+            print('It {:05d}: loss = {:10.8e} '.format(self.iter, self.current_loss))
+        self.hist.append(self.current_loss)
+        self.iter+=1        
+    
+    def get_prediction(self, **kwargs):
+
+        t_pred = np.linspace(0, 10, 101).flatten()[:,None]
+        x_pred, y_pred, z_pred,x2_pred, y2_pred, z2_pred,x3_pred, y3_pred, z3_pred = self.model(t_pred)
+      
+        return x_pred, y_pred, z_pred, x2_pred, y2_pred, z2_pred,x3_pred, y3_pred, z3_pred
+    
+    def return_parameters(self,**kwargs):
+        return self.iter, self.hist, self.model.kx_list, self.model.kxy_list,self.model.Kxy_list,self.model.kyx_list,self.model.Kyx_list, self.model.kzy_list, self.model.Kzy_list, self.model.k1_list, self.model.k2_list, self.model.k3_list  
+
+# In[5]
+
+filehandler = open("threenodes_2c1is_r1_lr2e-3_loss1e-2.obj","rb")
+[Parameters1,Prediction1,Beta] = pickle.load(filehandler)
+filehandler.close()
+iterations = 5
+
+M = np.array([[1, 0,1,0,1,1,1,0,1,0,1,1,1,1,1,1],
+              [1, 0,1,0,1,1,1,0,1,1,1,1,1,1,1,1],
+              [1, 1,1,0,1,1,1,0,1,0,1,1,1,1,1,1],
+              [1, 0,1,1,1,1,1,0,1,0,1,1,1,1,1,1],
+              [1, 0,1,0,1,1,1,1,1,0,1,1,1,1,1,1]])
+#M = np.repeat(M, repeats=5, axis=0)
+num = np.shape(M)[0]
+
+Parameters = np.zeros((1, 5, iterations+1, 19)) # 9 parameters + 1 loss + computation time
+Prediction = np.zeros((1, 5, iterations+1, 101,9))
+
+
+for i in range(0, 1):
+    
+    for jj in range(2,3):
+        t_all = np.linspace(0, 10, 101)
+        t_data = t_all[0::5].flatten()[:,None]
+        x_data = Prediction1[i,jj,0,0::5,0,0].flatten()[:,None]
+        y_data = Prediction1[i,jj,0,0::5,1,0].flatten()[:,None]
+        z_data = Prediction1[i,jj,0,0::5,2,0].flatten()[:,None]
+        x2_data =Prediction1[i,jj,0,0::5,3,0].flatten()[:,None]
+        y2_data =Prediction1[i,jj,0,0::5,4,0].flatten()[:,None]
+        z2_data =Prediction1[i,jj,0,0::5,5,0].flatten()[:,None]
+
+        # collocation points for enforcing ODE, minimizing residual
+        t_physics = t_data
+    
+        # convert arrays to tf tensors
+        t_data_tf = tf.convert_to_tensor(t_data, dtype=DTYPE)
+        x_data_tf = tf.convert_to_tensor(x_data, dtype=DTYPE)
+        y_data_tf = tf.convert_to_tensor(y_data, dtype=DTYPE)
+        z_data_tf = tf.convert_to_tensor(z_data, dtype=DTYPE)
+        x2_data_tf = tf.convert_to_tensor(x2_data, dtype=DTYPE)
+        y2_data_tf = tf.convert_to_tensor(y2_data, dtype=DTYPE)
+        z2_data_tf = tf.convert_to_tensor(z2_data, dtype=DTYPE)
+
+        t_physics_tf = tf.convert_to_tensor(t_physics, dtype=DTYPE)
+
+        T_data = tf.reshape(t_data_tf[:], shape=(t_data.shape[0],1))
+        X_data = tf.reshape(x_data_tf[:], shape=(x_data.shape[0],1))
+        Y_data = tf.reshape(y_data_tf[:], shape=(y_data.shape[0],1))
+        Z_data = tf.reshape(z_data_tf[:], shape=(z_data.shape[0],1))
+        X2_data = tf.reshape(x2_data_tf[:], shape=(x_data.shape[0],1))
+        Y2_data = tf.reshape(y2_data_tf[:], shape=(y_data.shape[0],1))
+        Z2_data = tf.reshape(z2_data_tf[:], shape=(z_data.shape[0],1))
+
+        T_r = tf.reshape(t_physics_tf[:], shape=(t_physics.shape[0],1))
+    
+        for j in range(1, iterations+1): # try 20 iterations   
+                model = PINNIdentificationNet_c3()
+                model.build(input_shape=(None,1))
+
+                # Initialize PINN solver
+                solver = PINNSolver_ID_c3(model, T_r)
+                # Start timer
+                t0 = time()
+
+                #lr = tf.keras.optimizers.schedules.PiecewiseConstantDecay([3000,6000],[1e-2,1e-3,5e-4])
+                lr = 2e-3
+                optim = tf.keras.optimizers.Adam(learning_rate=lr)
+                solver.solve_with_TFoptimizer(optim, T_data, X_data, Y_data, Z_data, X2_data, Y2_data, Z2_data,target= 0.005, max_iter = 5e4)
+                # Print computation time
+                Parameters[i,jj,j,18] = time()-t0
+                print('\nComputation time: {} seconds'.format(Parameters[i,jj,j,18]))
+                iterc, loss, kx_list, kxy_list, Kxy_list, kyx_list, Kyx_list, kzy_list,Kzy_list, k1_list, k2_list, k3_list  = solver.return_parameters();
+                Parameters[i,jj,j,0:16] = kx_list[-1],kxy_list[-1], Kxy_list[-1],0,1, kyx_list[-1], Kyx_list[-1], 0,1, 0,1,kzy_list[-1], Kzy_list[-1], k1_list[-1], k2_list[-1], k3_list[-1]
+                Parameters[i,jj,j,16] = loss[-1]
+                Parameters[i,jj,j,17] = iterc
+                x_pred,y_pred, z_pred,x2_pred,y2_pred, z2_pred,x3_pred,y3_pred, z3_pred = solver.get_prediction();
+                Prediction[i,jj,j,:,0] = x_pred[:,0] 
+                Prediction[i,jj,j,:,1] = y_pred[:,0]     
+                Prediction[i,jj,j,:,2] = z_pred[:,0]
+                Prediction[i,jj,j,:,3] = x2_pred[:,0] 
+                Prediction[i,jj,j,:,4] = y2_pred[:,0]     
+                Prediction[i,jj,j,:,5] = z2_pred[:,0]
+                Prediction[i,jj,j,:,6] = x3_pred[:,0] 
+                Prediction[i,jj,j,:,7] = y3_pred[:,0]     
+                Prediction[i,jj,j,:,8] = z3_pred[:,0]
+                print(i)
+                print(jj)
+                print(j)
+                filehandler = open("threenodes_2c1is_r1_lr2e-3_loss1e-2_fit3.obj","wb")
+                pickle.dump([Parameters,Prediction,Beta],filehandler)
+                filehandler.close()
+
+# In[1]: Circuit 4
+
+# Define model architecture
+class PINNIdentificationNet_c4(tf.keras.Model):
+    """ Set basic architecture of the PINN model."""
+    # used when the class is called to initialize the instance
+    def __init__(self, 
+            output_dim=9,
+            num_hidden_layers=3, 
+            num_neurons_per_layer=24,
+            activation='tanh',
+            kernel_initializer='glorot_normal',
+            **kwargs):
+        super().__init__(**kwargs)
+
+        self.num_hidden_layers = num_hidden_layers
+        self.output_dim = output_dim
+        
+        # Define NN architecture
+        self.hidden = [tf.keras.layers.Dense(num_neurons_per_layer,
+                             activation=tf.keras.activations.get(activation),
+                             kernel_initializer=kernel_initializer)
+                           for _ in range(self.num_hidden_layers)]
+        self.out = tf.keras.layers.Dense(output_dim)
+
+        
+        # Initialize variable for mu, k: if trainable=True, will be trained along NN       
+        self.kx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kx_list = []
+        
+        self.kyx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kyx_list = []
+        self.Kyx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.Kyx_list = []
+        
+        
+        self.kxz = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kxz_list = []
+        self.Kxz = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.Kxz_list = []
+        
+        
+        self.kzy = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kzy_list = []
+        self.Kzy = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.Kzy_list = []
+        
+        self.k1 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.k1_list = []
+        self.k2 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.k2_list = []
+        self.k3 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.k3_list = []
+     
+
+    # used when the instance is called          
+    def call(self, T):
+        """Forward-pass through neural network."""
+        Z = self.hidden[0](T)
+        for i in range(1,self.num_hidden_layers):
+            Z = self.hidden[i](Z)
+        xyz = self.out(Z)
+        x = xyz[:,0:1]
+        y = xyz[:,1:2]
+        z = xyz[:,2:3]
+        x2 = xyz[:,3:4]
+        y2 = xyz[:,4:5]
+        z2 = xyz[:,5:6]
+        x3 = xyz[:,6:7]
+        y3 = xyz[:,7:8]
+        z3 = xyz[:,8:9]
+        return x, y, z, x2, y2, z2, x3, y3, z3
+
+class PINNSolver_ID_c4():
+    def __init__(self, model, T_r):
+        self.model = model
+        
+        # Store collocation points
+        self.t = T_r[:,0:1]
+        
+        # Initialize history of losses and global iteration counter
+        self.hist = []
+        self.iter = 0
+    
+    def get_r(self):
+        
+        with tf.GradientTape(persistent=True) as tape:
+            # Watch variables representing t during this GradientTape
+            tape.watch(self.t)
+            
+            # Compute current values u(t,x)
+            x, y, z,x2, y2, z2,x3, y3, z3 = self.model(self.t[:,0:1])
+            
+            x_t = tape.gradient(x, self.t)
+            y_t = tape.gradient(y, self.t)
+            z_t = tape.gradient(z, self.t)
+            x2_t = tape.gradient(x2, self.t)
+            y2_t = tape.gradient(y2, self.t)
+            z2_t = tape.gradient(z2, self.t)
+            x3_t = tape.gradient(x3, self.t)
+            y3_t = tape.gradient(y3, self.t)
+            z3_t = tape.gradient(z3, self.t)
+        
+        del tape
+        
+        return self.fun_r(x, y, z, x_t, y_t, z_t,x2, y2, z2, x2_t, y2_t, z2_t,x3, y3, z3, x3_t, y3_t, z3_t)
+    
+    def loss_fn(self, T, x, y, z, x2, y2, z2, x3, y3, z3):
+        
+        # Compute phi_r: loss coming from residual
+        f_x, f_y, f_z, f_x2, f_y2, f_z2,f_x3, f_y3, f_z3 = self.get_r()
+        phi_r = (1-alpha)*tf.reduce_mean(tf.square(f_x)+tf.square(f_y)+tf.square(f_z)+tf.square(f_x2)+tf.square(f_y2)+tf.square(f_z2)+tf.square(f_x3)+tf.square(f_y3)+tf.square(f_z3))
+        
+        # Initialize loss
+        loss = phi_r
+
+        # Add loss coming from difference to training data
+        for i in range(len(T)):
+            x_pred, y_pred, z_pred,x2_pred, y2_pred, z2_pred,x3_pred, y3_pred, z3_pred = self.model(T[i:i+1,0:1])
+            loss += alpha*tf.reduce_mean(tf.square(x[i] - x_pred)+tf.square(y[i] - y_pred)+tf.square(z[i] - z_pred)+tf.square(x2[i] - x2_pred)+tf.square(y2[i] - y2_pred)+tf.square(z2[i] - z2_pred)+tf.square(x3[i] - x3_pred)+tf.square(y3[i] - y3_pred)+tf.square(z3[i] - z3_pred))
+        return loss
+    
+    def get_grad(self, T, x,y, z, x2, y2, z2, x3,y3, z3):
+        with tf.GradientTape(persistent=True) as tape:
+            # This tape is for derivatives with
+            # respect to trainable variables
+            tape.watch(self.model.trainable_variables)
+            loss = self.loss_fn(T, x, y, z, x2, y2, z2, x3,y3, z3)            
+        g = tape.gradient(loss, self.model.trainable_variables)
+        del tape
+        
+        return loss, g
+    
+   
+    def fun_r(self, x, y, z, x_t, y_t, z_t, x2, y2, z2, x2_t, y2_t, z2_t, x3, y3, z3, x3_t, y3_t, z3_t):
+        f_x = x_t - self.model.kx - self.model.kxz*z/(self.model.Kxz+z) + self.model.k1*x
+        f_y = y_t - self.model.kyx*x/(self.model.Kyx+x) + self.model.k2*y 
+        f_z = z_t  - self.model.kzy*y/(self.model.Kzy+y)+ self.model.k3*z
+        f_x2 = x2_t - 2*self.model.kx - self.model.kxz*z2/(self.model.Kxz+z2) + self.model.k1*x2
+        f_y2 = y2_t - self.model.kyx*x2/(self.model.Kyx+x2) + self.model.k2*y2
+        f_z2 = z2_t  - self.model.kzy*y2/(self.model.Kzy+y2)+ self.model.k3*z2
+        f_x3 = x3_t - self.model.kx  - self.model.kxz*z3/(self.model.Kxz+z3) + self.model.k1*x3
+        f_y3 = y3_t - self.model.kyx*x3/(self.model.Kyx+x3)+ self.model.k2*y3 
+        f_z3 = z3_t  - 0.1*self.model.kzy*y3/(self.model.Kzy+y3)+ self.model.k3*z3
+
+        return f_x, f_y, f_z, f_x2, f_y2, f_z2, f_x3, f_y3, f_z3
+    
+    def solve_with_TFoptimizer(self, optimizer, T, x, y, z,x2, y2, z2,x3, y3, z3, target=1e-5, max_iter = 1e5):
+        """This method performs a gradient descent type optimization."""
+        
+        @tf.function
+        def train_step():
+            loss, grad_theta = self.get_grad(T, x, y, z, x2, y2, z2, x3, y3, z3)
+            
+            # Perform gradient descent step
+            optimizer.apply_gradients(zip(grad_theta, self.model.trainable_variables))
+            return loss
+        
+        # for i in range(N):
+        loss = 1.0
+        count = 0
+        while (loss > target):
+            
+            loss = train_step()
+            count = count+ 1
+            if (count>max_iter): 
+                break            
+            self.current_loss = loss.numpy()
+            self.callback()
+            
+    def callback(self, tr=None):
+        
+        kx = self.model.kx.numpy()
+        self.model.kx_list.append(kx)  
+
+        kxz = self.model.kxz.numpy()
+        self.model.kxz_list.append(kxz)        
+        Kxz = self.model.Kxz.numpy()
+        self.model.Kxz_list.append(Kxz)
+          
+        kyx = self.model.kyx.numpy()
+        self.model.kyx_list.append(kyx)        
+        Kyx = self.model.Kyx.numpy()
+        self.model.Kyx_list.append(Kyx)
+
+        kzy = self.model.kzy.numpy()
+        self.model.kzy_list.append(kzy)
+        Kzy = self.model.Kzy.numpy()
+        self.model.Kzy_list.append(Kzy)
+        
+        k1 = self.model.k1.numpy()
+        self.model.k1_list.append(k1)
+        k2 = self.model.k2.numpy()
+        self.model.k2_list.append(k2)
+        k3 = self.model.k3.numpy()
+        self.model.k3_list.append(k3)
+
+        
+
+        if self.iter % 1000 == 0:
+            print('It {:05d}: loss = {:10.8e}'.format(self.iter, self.current_loss))
+        self.hist.append(self.current_loss)
+        self.iter+=1        
+    
+    def get_prediction(self, **kwargs):
+
+        t_pred = np.linspace(0, 10, 101).flatten()[:,None]
+        x_pred, y_pred, z_pred,x2_pred, y2_pred, z2_pred,x3_pred, y3_pred, z3_pred = self.model(t_pred)
+      
+        return x_pred, y_pred, z_pred, x2_pred, y2_pred, z2_pred,x3_pred, y3_pred, z3_pred
+    
+    def return_parameters(self,**kwargs):
+        return self.iter, self.hist, self.model.kx_list, self.model.kxz_list,self.model.Kxz_list,self.model.kyx_list,self.model.Kyx_list, self.model.kzy_list, self.model.Kzy_list, self.model.k1_list, self.model.k2_list, self.model.k3_list  
+        
+# In[1]
+filehandler = open("threenodes_2c1is_r1_lr2e-3_loss1e-2.obj","rb")
+[Parameters1,Prediction1,Beta] = pickle.load(filehandler)
+filehandler.close()
+iterations = 5
+
+M = np.array([[1, 0,1,0,1,1,1,0,1,0,1,1,1,1,1,1],
+              [1, 0,1,0,1,1,1,0,1,1,1,1,1,1,1,1],
+              [1, 1,1,0,1,1,1,0,1,0,1,1,1,1,1,1],
+              [1, 0,1,1,1,1,1,0,1,0,1,1,1,1,1,1],
+              [1, 0,1,0,1,1,1,1,1,0,1,1,1,1,1,1]])
+#M = np.repeat(M, repeats=5, axis=0)
+num = np.shape(M)[0]
+
+Parameters = np.zeros((1, 5, iterations+1, 19)) # 9 parameters + 1 loss + computation time
+Prediction = np.zeros((1, 5, iterations+1, 101,9))
+
+filehandler = open("threenodes_2c1is_r1_lr2e-3_loss5e-3_fit4.obj","rb")
+[Parameters,Prediction, Beta] = pickle.load(filehandler)
+filehandler.close()
+
+for i in range(0, 1):
+    
+    for jj in range(3,4):
+        t_all = np.linspace(0, 10, 101)
+        t_data = t_all[0::5].flatten()[:,None]
+        x_data = Prediction1[i,jj,0,0::5,0,0].flatten()[:,None]
+        y_data = Prediction1[i,jj,0,0::5,1,0].flatten()[:,None]
+        z_data = Prediction1[i,jj,0,0::5,2,0].flatten()[:,None]
+        x2_data =Prediction1[i,jj,0,0::5,3,0].flatten()[:,None]
+        y2_data =Prediction1[i,jj,0,0::5,4,0].flatten()[:,None]
+        z2_data =Prediction1[i,jj,0,0::5,5,0].flatten()[:,None]
+        x3_data =Prediction1[i,jj,0,0::5,6,0].flatten()[:,None]
+        y3_data =Prediction1[i,jj,0,0::5,7,0].flatten()[:,None]
+        z3_data =Prediction1[i,jj,0,0::5,8,0].flatten()[:,None]
+        # collocation points for enforcing ODE, minimizing residual
+        t_physics = t_data
+    
+        # convert arrays to tf tensors
+        t_data_tf = tf.convert_to_tensor(t_data, dtype=DTYPE)
+        x_data_tf = tf.convert_to_tensor(x_data, dtype=DTYPE)
+        y_data_tf = tf.convert_to_tensor(y_data, dtype=DTYPE)
+        z_data_tf = tf.convert_to_tensor(z_data, dtype=DTYPE)
+        x2_data_tf = tf.convert_to_tensor(x2_data, dtype=DTYPE)
+        y2_data_tf = tf.convert_to_tensor(y2_data, dtype=DTYPE)
+        z2_data_tf = tf.convert_to_tensor(z2_data, dtype=DTYPE)
+        x3_data_tf = tf.convert_to_tensor(x3_data, dtype=DTYPE)
+        y3_data_tf = tf.convert_to_tensor(y3_data, dtype=DTYPE)
+        z3_data_tf = tf.convert_to_tensor(z3_data, dtype=DTYPE)
+        t_physics_tf = tf.convert_to_tensor(t_physics, dtype=DTYPE)
+
+        T_data = tf.reshape(t_data_tf[:], shape=(t_data.shape[0],1))
+        X_data = tf.reshape(x_data_tf[:], shape=(x_data.shape[0],1))
+        Y_data = tf.reshape(y_data_tf[:], shape=(y_data.shape[0],1))
+        Z_data = tf.reshape(z_data_tf[:], shape=(z_data.shape[0],1))
+        X2_data = tf.reshape(x2_data_tf[:], shape=(x_data.shape[0],1))
+        Y2_data = tf.reshape(y2_data_tf[:], shape=(y_data.shape[0],1))
+        Z2_data = tf.reshape(z2_data_tf[:], shape=(z_data.shape[0],1))
+        X3_data = tf.reshape(x3_data_tf[:], shape=(x_data.shape[0],1))
+        Y3_data = tf.reshape(y3_data_tf[:], shape=(y_data.shape[0],1))
+        Z3_data = tf.reshape(z3_data_tf[:], shape=(z_data.shape[0],1))
+        T_r = tf.reshape(t_physics_tf[:], shape=(t_physics.shape[0],1))
+    
+        for j in range(3, iterations+1): # try 20 iterations   
+                model = PINNIdentificationNet_c4()
+                model.build(input_shape=(None,1))
+
+                # Initialize PINN solver
+                solver = PINNSolver_ID_c4(model, T_r)
+                # Start timer
+                t0 = time()
+
+                #lr = tf.keras.optimizers.schedules.PiecewiseConstantDecay([3000,6000],[1e-2,1e-3,5e-4])
+                lr = 2e-3
+                optim = tf.keras.optimizers.Adam(learning_rate=lr)
+                solver.solve_with_TFoptimizer(optim, T_data, X_data, Y_data, Z_data, X2_data, Y2_data, Z2_data, X3_data, Y3_data, Z3_data,target= 0.005, max_iter = 5e4)
+                # Print computation time
+                Parameters[i,jj,j,18] = time()-t0
+                print('\nComputation time: {} seconds'.format(Parameters[i,jj,j,18]))
+                iterc, loss, kx_list, kxz_list, Kxz_list, kyx_list, Kyx_list, kzy_list, Kzy_list, k1_list, k2_list, k3_list  = solver.return_parameters();
+                Parameters[i,jj,j,0:16] = kx_list[-1],0,1,kxz_list[-1], Kxz_list[-1],kyx_list[-1], Kyx_list[-1], 0,1, 0, 1,kzy_list[-1], Kzy_list[-1], k1_list[-1], k2_list[-1], k3_list[-1]
+                Parameters[i,jj,j,16] = loss[-1]
+                Parameters[i,jj,j,17] = iterc
+                x_pred,y_pred, z_pred,x2_pred,y2_pred, z2_pred,x3_pred,y3_pred, z3_pred = solver.get_prediction();
+                Prediction[i,jj,j,:,0] = x_pred[:,0] 
+                Prediction[i,jj,j,:,1] = y_pred[:,0]     
+                Prediction[i,jj,j,:,2] = z_pred[:,0]
+                Prediction[i,jj,j,:,3] = x2_pred[:,0] 
+                Prediction[i,jj,j,:,4] = y2_pred[:,0]     
+                Prediction[i,jj,j,:,5] = z2_pred[:,0]
+                Prediction[i,jj,j,:,6] = x3_pred[:,0] 
+                Prediction[i,jj,j,:,7] = y3_pred[:,0]     
+                Prediction[i,jj,j,:,8] = z3_pred[:,0]
+                print(Parameters[i,jj,j,15])
+                print(i)
+                print(jj)
+                print(j)
+                filehandler = open("threenodes_2c1is_r1_lr2e-3_loss1e-2_fit4.obj","wb")
+                pickle.dump([Parameters,Prediction,Beta],filehandler)
+                filehandler.close()
+                
+# In[1]: Circuit 5
+
+# Define model architecture
+class PINNIdentificationNet_c5(tf.keras.Model):
+    """ Set basic architecture of the PINN model."""
+    # used when the class is called to initialize the instance
+    def __init__(self, 
+            output_dim=9,
+            num_hidden_layers=3, 
+            num_neurons_per_layer=24,
+            activation='tanh',
+            kernel_initializer='glorot_normal',
+            **kwargs):
+        super().__init__(**kwargs)
+
+        self.num_hidden_layers = num_hidden_layers
+        self.output_dim = output_dim
+        
+        # Define NN architecture
+        self.hidden = [tf.keras.layers.Dense(num_neurons_per_layer,
+                             activation=tf.keras.activations.get(activation),
+                             kernel_initializer=kernel_initializer)
+                           for _ in range(self.num_hidden_layers)]
+        self.out = tf.keras.layers.Dense(output_dim)
+
+        
+        # Initialize variable for mu, k: if trainable=True, will be trained along NN       
+        self.kx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kx_list = []
+        
+        self.kyx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kyx_list = []
+        self.Kyx = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.Kyx_list = []
+        
+        self.kyz = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kyz_list = []
+        self.Kyz = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.Kyz_list = []
+        
+        
+        self.kzy = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.kzy_list = []
+        self.Kzy = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.Kzy_list = []
+        
+        self.k1 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.k1_list = []
+        self.k2 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.k2_list = []
+        self.k3 = tf.Variable(tf.random.uniform(shape = (), minval= 0.1, maxval=1), trainable=True, dtype=tf.float32, constraint=lambda x: tf.clip_by_value(x, 0., 5.))
+        self.k3_list = []
+
+    # used when the instance is called          
+    def call(self, T):
+        """Forward-pass through neural network."""
+        Z = self.hidden[0](T)
+        for i in range(1,self.num_hidden_layers):
+            Z = self.hidden[i](Z)
+        xyz = self.out(Z)
+        x = xyz[:,0:1]
+        y = xyz[:,1:2]
+        z = xyz[:,2:3]
+        x2 = xyz[:,3:4]
+        y2 = xyz[:,4:5]
+        z2 = xyz[:,5:6]
+        x3 = xyz[:,6:7]
+        y3 = xyz[:,7:8]
+        z3 = xyz[:,8:9]
+        return x, y, z, x2, y2, z2, x3, y3, z3
+
+
+class PINNSolver_ID_c5():
+    def __init__(self, model, T_r):
+        self.model = model
+        
+        # Store collocation points
+        self.t = T_r[:,0:1]
+        
+        # Initialize history of losses and global iteration counter
+        self.hist = []
+        self.iter = 0
+    
+    def get_r(self):
+        
+        with tf.GradientTape(persistent=True) as tape:
+            # Watch variables representing t during this GradientTape
+            tape.watch(self.t)
+            
+            # Compute current values u(t,x)
+            x, y, z,x2, y2, z2,x3, y3, z3 = self.model(self.t[:,0:1])
+            
+            x_t = tape.gradient(x, self.t)
+            y_t = tape.gradient(y, self.t)
+            z_t = tape.gradient(z, self.t)
+            x2_t = tape.gradient(x2, self.t)
+            y2_t = tape.gradient(y2, self.t)
+            z2_t = tape.gradient(z2, self.t)
+            x3_t = tape.gradient(x3, self.t)
+            y3_t = tape.gradient(y3, self.t)
+            z3_t = tape.gradient(z3, self.t)
+        
+        del tape
+        
+        return self.fun_r(x, y, z, x_t, y_t, z_t,x2, y2, z2, x2_t, y2_t, z2_t,x3, y3, z3, x3_t, y3_t, z3_t)
+    
+    def loss_fn(self, T, x, y, z, x2, y2, z2, x3, y3, z3):
+        
+        # Compute phi_r: loss coming from residual
+        f_x, f_y, f_z, f_x2, f_y2, f_z2,f_x3, f_y3, f_z3 = self.get_r()
+        phi_r = (1-alpha)*tf.reduce_mean(tf.square(f_x)+tf.square(f_y)+tf.square(f_z)+tf.square(f_x2)+tf.square(f_y2)+tf.square(f_z2)+tf.square(f_x3)+tf.square(f_y3)+tf.square(f_z3))
+        
+        # Initialize loss
+        loss = phi_r
+
+        # Add loss coming from difference to training data
+        for i in range(len(T)):
+            x_pred, y_pred, z_pred,x2_pred, y2_pred, z2_pred,x3_pred, y3_pred, z3_pred = self.model(T[i:i+1,0:1])
+            loss += alpha*tf.reduce_mean(tf.square(x[i] - x_pred)+tf.square(y[i] - y_pred)+tf.square(z[i] - z_pred)+tf.square(x2[i] - x2_pred)+tf.square(y2[i] - y2_pred)+tf.square(z2[i] - z2_pred)+tf.square(x3[i] - x3_pred)+tf.square(y3[i] - y3_pred)+tf.square(z3[i] - z3_pred))
+        return loss
+    
+    def get_grad(self, T, x,y, z, x2, y2, z2, x3,y3, z3):
+        with tf.GradientTape(persistent=True) as tape:
+            # This tape is for derivatives with
+            # respect to trainable variables
+            tape.watch(self.model.trainable_variables)
+            loss = self.loss_fn(T, x, y, z, x2, y2, z2, x3,y3, z3)            
+        g = tape.gradient(loss, self.model.trainable_variables)
+        del tape
+        
+        return loss, g
+    
+   
+    def fun_r(self, x, y, z, x_t, y_t, z_t, x2, y2, z2, x2_t, y2_t, z2_t, x3, y3, z3, x3_t, y3_t, z3_t):
+        f_x = x_t - self.model.kx  + self.model.k1*x
+        f_y = y_t - self.model.kyx*x/(self.model.Kyx+x) - self.model.kyz*z/(self.model.Kyz+z)+ self.model.k2*y 
+        f_z = z_t  - self.model.kzy*y/(self.model.Kzy+y)+ self.model.k3*z
+        f_x2 = x2_t - 2*self.model.kx + self.model.k1*x2
+        f_y2 = y2_t - self.model.kyx*x2/(self.model.Kyx+x2) - self.model.kyz*z2/(self.model.Kyz+z2)+ self.model.k2*y2
+        f_z2 = z2_t  - self.model.kzy*y2/(self.model.Kzy+y2)+ self.model.k3*z2
+        f_x3 = x3_t - self.model.kx  + self.model.k1*x3
+        f_y3 = y3_t - self.model.kyx*x3/(self.model.Kyx+x3) - self.model.kyz*z3/(self.model.Kyz+z3)+ self.model.k2*y3 
+        f_z3 = z3_t  - 0.1*self.model.kzy*y3/(self.model.Kzy+y3)+ self.model.k3*z3
+
+        return f_x, f_y, f_z, f_x2, f_y2, f_z2, f_x3, f_y3, f_z3
+    
+    def solve_with_TFoptimizer(self, optimizer, T, x, y, z,x2, y2, z2,x3, y3, z3, target=1e-5, max_iter = 1e5):
+        """This method performs a gradient descent type optimization."""
+        
+        @tf.function
+        def train_step():
+            loss, grad_theta = self.get_grad(T, x, y, z, x2, y2, z2, x3, y3, z3)
+            
+            # Perform gradient descent step
+            optimizer.apply_gradients(zip(grad_theta, self.model.trainable_variables))
+            return loss
+        
+        # for i in range(N):
+        loss = 1.0
+        count = 0
+        while (loss > target):
+            
+            loss = train_step()
+            count = count+ 1
+            if (count>max_iter): 
+                break            
+            self.current_loss = loss.numpy()
+            self.callback()
+            
+    def callback(self, tr=None):
+        
+        kx = self.model.kx.numpy()
+        self.model.kx_list.append(kx)  
+          
+        kyx = self.model.kyx.numpy()
+        self.model.kyx_list.append(kyx)        
+        Kyx = self.model.Kyx.numpy()
+        self.model.Kyx_list.append(Kyx)
+        kyz = self.model.kyz.numpy()
+        self.model.kyz_list.append(kyz)   
+        Kyz = self.model.Kyz.numpy()
+        self.model.Kyz_list.append(Kyz)   
+
+        kzy = self.model.kzy.numpy()
+        self.model.kzy_list.append(kzy)
+        Kzy = self.model.Kzy.numpy()
+        self.model.Kzy_list.append(Kzy)
+        
+        k1 = self.model.k1.numpy()
+        self.model.k1_list.append(k1)
+        k2 = self.model.k2.numpy()
+        self.model.k2_list.append(k2)
+        k3 = self.model.k3.numpy()
+        self.model.k3_list.append(k3)
+
+        
+
+        if self.iter % 1000 == 0:
+            print('It {:05d}: loss = {:10.8e}'.format(self.iter, self.current_loss))
+        self.hist.append(self.current_loss)
+        self.iter+=1        
+    
+    def get_prediction(self, **kwargs):
+
+        t_pred = np.linspace(0, 10, 101).flatten()[:,None]
+        x_pred, y_pred, z_pred,x2_pred, y2_pred, z2_pred,x3_pred, y3_pred, z3_pred = self.model(t_pred)
+      
+        return x_pred, y_pred, z_pred, x2_pred, y2_pred, z2_pred,x3_pred, y3_pred, z3_pred
+    
+    def return_parameters(self,**kwargs):
+        return self.iter, self.hist, self.model.kx_list,self.model.kyx_list,self.model.Kyx_list, self.model.kyz_list,self.model.Kyz_list, self.model.kzy_list, self.model.Kzy_list, self.model.k1_list, self.model.k2_list, self.model.k3_list  
+
+# In[1]
+filehandler = open("threenodes_2c1is_r1_lr2e-3_loss1e-2.obj","rb")
+[Parameters1,Prediction1,Beta] = pickle.load(filehandler)
+filehandler.close()
+iterations = 5
+
+M = np.array([[1, 0,1,0,1,1,1,0,1,0,1,1,1,1,1,1],
+              [1, 0,1,0,1,1,1,0,1,1,1,1,1,1,1,1],
+              [1, 1,1,0,1,1,1,0,1,0,1,1,1,1,1,1],
+              [1, 0,1,1,1,1,1,0,1,0,1,1,1,1,1,1],
+              [1, 0,1,0,1,1,1,1,1,0,1,1,1,1,1,1]])
+#M = np.repeat(M, repeats=5, axis=0)
+num = np.shape(M)[0]
+
+Parameters = np.zeros((1, 5, iterations+1, 19)) # 9 parameters + 1 loss + computation time
+Prediction = np.zeros((1, 5, iterations+1, 101,9))
+
+
+for i in range(0, 1):
+    
+    for jj in range(4,5):
+        t_all = np.linspace(0, 10, 101)
+        t_data = t_all[0::5].flatten()[:,None]
+        x_data = Prediction1[i,jj,0,0::5,0,0].flatten()[:,None]
+        y_data = Prediction1[i,jj,0,0::5,1,0].flatten()[:,None]
+        z_data = Prediction1[i,jj,0,0::5,2,0].flatten()[:,None]
+        x2_data =Prediction1[i,jj,0,0::5,3,0].flatten()[:,None]
+        y2_data =Prediction1[i,jj,0,0::5,4,0].flatten()[:,None]
+        z2_data =Prediction1[i,jj,0,0::5,5,0].flatten()[:,None]
+        x3_data =Prediction1[i,jj,0,0::5,6,0].flatten()[:,None]
+        y3_data =Prediction1[i,jj,0,0::5,7,0].flatten()[:,None]
+        z3_data =Prediction1[i,jj,0,0::5,8,0].flatten()[:,None]
+        # collocation points for enforcing ODE, minimizing residual
+        t_physics = t_data
+    
+        # convert arrays to tf tensors
+        t_data_tf = tf.convert_to_tensor(t_data, dtype=DTYPE)
+        x_data_tf = tf.convert_to_tensor(x_data, dtype=DTYPE)
+        y_data_tf = tf.convert_to_tensor(y_data, dtype=DTYPE)
+        z_data_tf = tf.convert_to_tensor(z_data, dtype=DTYPE)
+        x2_data_tf = tf.convert_to_tensor(x2_data, dtype=DTYPE)
+        y2_data_tf = tf.convert_to_tensor(y2_data, dtype=DTYPE)
+        z2_data_tf = tf.convert_to_tensor(z2_data, dtype=DTYPE)
+        x3_data_tf = tf.convert_to_tensor(x3_data, dtype=DTYPE)
+        y3_data_tf = tf.convert_to_tensor(y3_data, dtype=DTYPE)
+        z3_data_tf = tf.convert_to_tensor(z3_data, dtype=DTYPE)
+        t_physics_tf = tf.convert_to_tensor(t_physics, dtype=DTYPE)
+
+        T_data = tf.reshape(t_data_tf[:], shape=(t_data.shape[0],1))
+        X_data = tf.reshape(x_data_tf[:], shape=(x_data.shape[0],1))
+        Y_data = tf.reshape(y_data_tf[:], shape=(y_data.shape[0],1))
+        Z_data = tf.reshape(z_data_tf[:], shape=(z_data.shape[0],1))
+        X2_data = tf.reshape(x2_data_tf[:], shape=(x_data.shape[0],1))
+        Y2_data = tf.reshape(y2_data_tf[:], shape=(y_data.shape[0],1))
+        Z2_data = tf.reshape(z2_data_tf[:], shape=(z_data.shape[0],1))
+        X3_data = tf.reshape(x3_data_tf[:], shape=(x_data.shape[0],1))
+        Y3_data = tf.reshape(y3_data_tf[:], shape=(y_data.shape[0],1))
+        Z3_data = tf.reshape(z3_data_tf[:], shape=(z_data.shape[0],1))
+        T_r = tf.reshape(t_physics_tf[:], shape=(t_physics.shape[0],1))
+    
+        for j in range(1, iterations+1): # try 20 iterations   
+                model = PINNIdentificationNet_c5()
+                model.build(input_shape=(None,1))
+
+                # Initialize PINN solver
+                solver = PINNSolver_ID_c5(model, T_r)
+                # Start timer
+                t0 = time()
+
+                #lr = tf.keras.optimizers.schedules.PiecewiseConstantDecay([3000,6000],[1e-2,1e-3,5e-4])
+                lr = 2e-3
+                optim = tf.keras.optimizers.Adam(learning_rate=lr)
+                solver.solve_with_TFoptimizer(optim, T_data, X_data, Y_data, Z_data, X2_data, Y2_data, Z2_data, X3_data, Y3_data, Z3_data,target= 0.01)
+                # Print computation time
+                Parameters[i,jj,j,18] = time()-t0
+                print('\nComputation time: {} seconds'.format(Parameters[i,jj,j,18]))
+                iterc, loss, kx_list, kyx_list, Kyx_list, kyz_list, Kyz_list,  kzy_list, Kzy_list, k1_list, k2_list, k3_list  = solver.return_parameters();
+                Parameters[i,jj,j,0:16] = kx_list[-1],0,1,0, 1,kyx_list[-1], Kyx_list[-1], kyz_list[-1], Kyz_list[-1], 0,1, kzy_list[-1], Kzy_list[-1], k1_list[-1], k2_list[-1], k3_list[-1]
+                Parameters[i,jj,j,16] = loss[-1]
+                Parameters[i,jj,j,17] = iterc
+                x_pred,y_pred, z_pred,x2_pred,y2_pred, z2_pred,x3_pred,y3_pred, z3_pred = solver.get_prediction();
+                Prediction[i,jj,j,:,0] = x_pred[:,0] 
+                Prediction[i,jj,j,:,1] = y_pred[:,0]     
+                Prediction[i,jj,j,:,2] = z_pred[:,0]
+                Prediction[i,jj,j,:,3] = x2_pred[:,0] 
+                Prediction[i,jj,j,:,4] = y2_pred[:,0]     
+                Prediction[i,jj,j,:,5] = z2_pred[:,0]
+                Prediction[i,jj,j,:,6] = x3_pred[:,0] 
+                Prediction[i,jj,j,:,7] = y3_pred[:,0]     
+                Prediction[i,jj,j,:,8] = z3_pred[:,0]
+                print(i)
+                print(jj)
+                print(j)
+                filehandler = open("threenodes_2c1is_r1_lr2e-3_loss1e-2_fit5.obj","wb")
+                pickle.dump([Parameters,Prediction,Beta],filehandler)
+                filehandler.close()
